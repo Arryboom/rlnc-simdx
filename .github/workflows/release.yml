@@ -1,0 +1,374 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing release tag (for example, v1.1.0)"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.workflow }}-${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  prepare:
+    name: Validate and package source crate
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
+    outputs:
+      tag: ${{ steps.release.outputs.tag }}
+      version: ${{ steps.release.outputs.version }}
+      commit: ${{ steps.release.outputs.commit }}
+    steps:
+      - name: Check out release tag
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
+
+      - name: Install Rust 1.89
+        uses: dtolnay/rust-toolchain@1.89
+        with:
+          components: clippy,rustfmt
+
+      - name: Resolve and validate release version
+        id: release
+        env:
+          REQUESTED_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+        run: |
+          set -euo pipefail
+
+          tag="$REQUESTED_TAG"
+          if [[ ! "$tag" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            echo "Release tag must match vMAJOR.MINOR.PATCH without leading zeroes; received: $tag" >&2
+            exit 1
+          fi
+
+          commit="$(git rev-parse HEAD)"
+          tag_commit="$(git rev-parse "refs/tags/${tag}^{commit}")"
+          if [[ "$commit" != "$tag_commit" ]]; then
+            echo "Checked-out commit $commit does not match tag $tag target $tag_commit" >&2
+            exit 1
+          fi
+
+          version="${tag#v}"
+          metadata="$(cargo metadata --locked --no-deps --format-version 1)"
+          library_version="$(jq -r '[.packages[] | select(.name == "rlnc-simdx") | .version] | if length == 1 then .[0] else empty end' <<<"$metadata")"
+          bench_version="$(jq -r '[.packages[] | select(.name == "rlnc-simdx-bench") | .version] | if length == 1 then .[0] else empty end' <<<"$metadata")"
+
+          if [[ -z "$library_version" || -z "$bench_version" ]]; then
+            echo "cargo metadata did not return exactly one version for each workspace package" >&2
+            exit 1
+          fi
+          if [[ "$version" != "$library_version" || "$version" != "$bench_version" ]]; then
+            echo "Tag version $version does not match workspace package versions: rlnc-simdx=$library_version, rlnc-simdx-bench=$bench_version" >&2
+            exit 1
+          fi
+
+          {
+            echo "tag=$tag"
+            echo "version=$version"
+            echo "commit=$commit"
+          } >>"$GITHUB_OUTPUT"
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Run strict Clippy
+        run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
+
+      - name: Run workspace tests
+        run: cargo test --locked --workspace
+
+      - name: Run all-feature library tests
+        run: cargo test --locked -p rlnc-simdx --all-features
+
+      - name: Check zero-feature core
+        run: cargo check --locked -p rlnc-simdx --no-default-features
+
+      - name: Check alloc-only library
+        run: cargo check --locked -p rlnc-simdx --no-default-features --features alloc
+
+      - name: Package source crate
+        run: cargo package --locked -p rlnc-simdx
+
+      - name: Validate source crate asset
+        env:
+          VERSION: ${{ steps.release.outputs.version }}
+        run: test -f "target/package/rlnc-simdx-${VERSION}.crate"
+
+      - name: Upload source crate
+        uses: actions/upload-artifact@v4
+        with:
+          name: rlnc-simdx-${{ steps.release.outputs.version }}.crate
+          path: target/package/rlnc-simdx-${{ steps.release.outputs.version }}.crate
+          if-no-files-found: error
+          retention-days: 7
+
+  native:
+    name: Build ${{ matrix.target }} archive
+    needs: prepare
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            extension: tar.gz
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            extension: zip
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            extension: tar.gz
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Check out release tag
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ needs.prepare.outputs.tag }}
+
+      - name: Install Rust 1.89 target
+        uses: dtolnay/rust-toolchain@1.89
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Build native benchmark on Linux
+        if: runner.os == 'Linux'
+        shell: bash
+        run: cargo build --release --locked --target "${{ matrix.target }}" -p rlnc-simdx-bench --bin bench_standalone
+
+      - name: Build native benchmark on macOS
+        if: runner.os == 'macOS'
+        shell: sh
+        run: cargo build --release --locked --target "${{ matrix.target }}" -p rlnc-simdx-bench --bin bench_standalone
+
+      - name: Build native benchmark on Windows
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: cargo build --release --locked --target "${{ matrix.target }}" -p rlnc-simdx-bench --bin bench_standalone
+
+      - name: Create normalized Linux archive
+        if: matrix.target == 'x86_64-unknown-linux-gnu'
+        shell: bash
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+
+          staging="dist/staging-${TARGET}"
+          archive="dist/rlnc-simdx-bench-${VERSION}-${TARGET}.tar.gz"
+          source_date_epoch="$(git show -s --format=%ct HEAD)"
+
+          rm -rf dist
+          mkdir -p "$staging"
+          install -m 0755 "target/${TARGET}/release/bench_standalone" "$staging/bench_standalone"
+          install -m 0644 README.md LICENSE "$staging/"
+          touch -d "@${source_date_epoch}" "$staging/LICENSE" "$staging/README.md" "$staging/bench_standalone"
+
+          LC_ALL=C tar --sort=name --mtime="@${source_date_epoch}" \
+            --owner=0 --group=0 --numeric-owner --format=ustar \
+            -C "$staging" -cf - LICENSE README.md bench_standalone \
+            | gzip -n -9 >"$archive"
+          sha256sum "$archive"
+
+      - name: Create normalized Windows archive
+        if: matrix.target == 'x86_64-pc-windows-msvc'
+        shell: pwsh
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          $dist = Join-Path $PWD 'dist'
+          $staging = Join-Path $dist "staging-$env:TARGET"
+          $archive = Join-Path $dist "rlnc-simdx-bench-$env:VERSION-$env:TARGET.zip"
+
+          if (Test-Path $dist) {
+            Remove-Item -Recurse -Force $dist
+          }
+          New-Item -ItemType Directory -Path $staging | Out-Null
+          Copy-Item -LiteralPath "target/$env:TARGET/release/bench_standalone.exe" -Destination (Join-Path $staging 'bench_standalone.exe')
+          Copy-Item -LiteralPath @('README.md', 'LICENSE') -Destination $staging
+
+          $epoch = [int64](& git show -s --format=%ct HEAD)
+          if ($LASTEXITCODE -ne 0) {
+            throw 'Unable to read the release commit timestamp'
+          }
+          $timestamp = [DateTimeOffset]::FromUnixTimeSeconds($epoch).UtcDateTime
+          Get-ChildItem -LiteralPath $staging -File | ForEach-Object {
+            $_.LastWriteTimeUtc = $timestamp
+          }
+
+          $files = @(
+            (Join-Path $staging 'LICENSE'),
+            (Join-Path $staging 'README.md'),
+            (Join-Path $staging 'bench_standalone.exe')
+          )
+          Compress-Archive -LiteralPath $files -DestinationPath $archive -CompressionLevel Optimal
+          Get-FileHash -Algorithm SHA256 -LiteralPath $archive | Format-List
+
+      - name: Create normalized macOS archive
+        if: matrix.target == 'x86_64-apple-darwin'
+        shell: sh
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -eu
+
+          staging="dist/staging-${TARGET}"
+          archive="dist/rlnc-simdx-bench-${VERSION}-${TARGET}.tar.gz"
+          archive_mtime="$(TZ=UTC git show -s --format=%cd --date=format-local:%Y%m%d%H%M.%S HEAD)"
+
+          rm -rf dist
+          mkdir -p "$staging"
+          cp "target/${TARGET}/release/bench_standalone" "$staging/bench_standalone"
+          cp README.md LICENSE "$staging/"
+          chmod 0755 "$staging/bench_standalone"
+          chmod 0644 "$staging/README.md" "$staging/LICENSE"
+          touch -t "$archive_mtime" "$staging/LICENSE" "$staging/README.md" "$staging/bench_standalone"
+
+          COPYFILE_DISABLE=1 LC_ALL=C tar --format ustar \
+            --uid 0 --gid 0 --uname root --gname root \
+            -C "$staging" -cf - LICENSE README.md bench_standalone \
+            | gzip -n -9 >"$archive"
+          shasum -a 256 "$archive"
+
+      - name: Upload native archive
+        uses: actions/upload-artifact@v4
+        with:
+          name: rlnc-simdx-bench-${{ needs.prepare.outputs.version }}-${{ matrix.target }}.${{ matrix.extension }}
+          path: dist/rlnc-simdx-bench-${{ needs.prepare.outputs.version }}-${{ matrix.target }}.${{ matrix.extension }}
+          if-no-files-found: error
+          retention-days: 7
+
+  release:
+    name: Publish GitHub release
+    needs: [prepare, native]
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Download release assets
+        uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+          merge-multiple: true
+
+      - name: Validate assets and create checksums
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          set -euo pipefail
+
+          expected=(
+            "rlnc-simdx-${VERSION}.crate"
+            "rlnc-simdx-bench-${VERSION}-x86_64-apple-darwin.tar.gz"
+            "rlnc-simdx-bench-${VERSION}-x86_64-pc-windows-msvc.zip"
+            "rlnc-simdx-bench-${VERSION}-x86_64-unknown-linux-gnu.tar.gz"
+          )
+
+          mapfile -t actual < <(find release-assets -maxdepth 1 -type f -printf '%f\n' | LC_ALL=C sort)
+          mapfile -t expected_sorted < <(printf '%s\n' "${expected[@]}" | LC_ALL=C sort)
+          if ! diff -u <(printf '%s\n' "${expected_sorted[@]}") <(printf '%s\n' "${actual[@]}"); then
+            echo "Downloaded release assets do not match the expected set" >&2
+            exit 1
+          fi
+
+          (
+            cd release-assets
+            printf '%s\n' "${expected[@]}" | LC_ALL=C sort | while IFS= read -r file; do
+              sha256sum -- "$file"
+            done >SHA256SUMS
+          )
+
+      - name: Generate release notes
+        env:
+          TAG: ${{ needs.prepare.outputs.tag }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+          COMMIT: ${{ needs.prepare.outputs.commit }}
+        run: |
+          set -euo pipefail
+
+          {
+            printf '# rlnc-simdx %s\n\n' "$VERSION"
+            printf -- '- Tag: `%s`\n' "$TAG"
+            printf -- '- Commit: [`%s`](https://github.com/%s/commit/%s)\n\n' "$COMMIT" "$GITHUB_REPOSITORY" "$COMMIT"
+            printf '## Assets\n\n'
+            printf '| Filename | SHA-256 |\n'
+            printf '|---|---|\n'
+            while read -r hash filename; do
+              printf '| `%s` | `%s` |\n' "$filename" "$hash"
+            done <release-assets/SHA256SUMS
+            printf '| `SHA256SUMS` | Not self-hashed |\n'
+            printf '\n`SHA256SUMS` is the checksum manifest and is intentionally not self-hashed.\n\n'
+            printf '## Verification\n\n'
+            printf 'Download all release assets into one directory. On Linux, or on macOS with GNU coreutils:\n\n'
+            printf '```bash\nsha256sum -c SHA256SUMS\n```\n\n'
+            printf 'On macOS without `sha256sum`, use the system fallback:\n\n'
+            printf '```bash\nshasum -a 256 -c SHA256SUMS\n```\n\n'
+            printf 'On PowerShell, compute hashes and compare them with `SHA256SUMS`:\n\n'
+            printf '```powershell\nGet-ChildItem rlnc-simdx-* | Get-FileHash -Algorithm SHA256\n```\n\n'
+            printf '[View the CHANGELOG for `%s`](https://github.com/%s/blob/%s/CHANGELOG.md).\n' "$TAG" "$GITHUB_REPOSITORY" "$TAG"
+          } >release-notes.md
+
+      - name: Enforce release update policy
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.prepare.outputs.tag }}
+        run: |
+          set -euo pipefail
+
+          status="$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' \
+            --header "Authorization: Bearer ${GH_TOKEN}" \
+            --header "Accept: application/vnd.github+json" \
+            --header "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/releases/tags/${TAG}")"
+
+          case "$status" in
+            200)
+              if [[ "$GITHUB_EVENT_NAME" != "workflow_dispatch" ]]; then
+                echo "Release $TAG already exists; tag-triggered runs may not overwrite it" >&2
+                exit 1
+              fi
+              echo "Manual rerun will update the release body and overwrite same-named assets for $TAG"
+              ;;
+            404)
+              echo "Release $TAG does not exist and will be created"
+              ;;
+            *)
+              echo "Unable to determine whether release $TAG exists; GitHub API returned HTTP $status" >&2
+              exit 1
+              ;;
+          esac
+
+      - name: Create or update GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.prepare.outputs.tag }}
+          name: rlnc-simdx ${{ needs.prepare.outputs.version }}
+          body_path: release-notes.md
+          target_commitish: ${{ needs.prepare.outputs.commit }}
+          files: release-assets/*
+          fail_on_unmatched_files: true
+          overwrite_files: true
+          make_latest: true

@@ -1,0 +1,148 @@
+name: CI
+
+on:
+  push:
+    branches: [main, dev]
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  test:
+    name: Workspace default tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo test --workspace
+
+  library_features:
+    name: Library feature gates
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Test all library features
+        run: cargo test -p rlnc-simdx --all-features
+      - name: Check zero-feature core
+        run: cargo check -p rlnc-simdx --no-default-features
+      - name: Check alloc-only library
+        run: cargo check -p rlnc-simdx --no-default-features --features alloc
+
+  x86_ssse3:
+    name: x86_64 SSSE3
+    runs-on: ubuntu-latest
+    env:
+      RUSTFLAGS: "-C target-feature=+ssse3"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo test -p rlnc-simdx
+
+  x86_avx2:
+    name: x86_64 AVX2+SSSE3
+    runs-on: ubuntu-latest
+    env:
+      RUSTFLAGS: "-C target-feature=+avx2,+ssse3"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo test -p rlnc-simdx
+
+  x86_gfni_avx2:
+    name: x86_64 GFNI+AVX2 (check)
+    runs-on: ubuntu-latest
+    env:
+      RUSTFLAGS: "-C target-feature=+gfni,+avx2"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo check -p rlnc-simdx
+
+  x86_avx512_gfni:
+    name: x86_64 AVX-512+GFNI (check)
+    runs-on: ubuntu-latest
+    env:
+      RUSTFLAGS: "-C target-feature=+avx512f,+avx512bw,+gfni,+ssse3"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo check -p rlnc-simdx
+
+  aarch64_neon:
+    name: AArch64 NEON
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-unknown-linux-gnu
+      - name: Install cross
+        run: cargo install cross --locked
+      - run: cross test -p rlnc-simdx --target aarch64-unknown-linux-gnu
+
+  aarch64_sve:
+    name: AArch64 SVE (compile check only)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          targets: aarch64-unknown-linux-gnu
+      - name: Install cross
+        run: cargo install cross --locked
+      - name: Check experimental SVE code remains gated
+        env:
+          RUSTFLAGS: "-C target-feature=+sve"
+        run: cross check -p rlnc-simdx --target aarch64-unknown-linux-gnu
+
+  wasm:
+    name: WASM checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown,wasm32-wasip1
+      - name: Check wasm32-unknown-unknown SIMD128 with alloc
+        env:
+          RUSTFLAGS: "-C target-feature=+simd128"
+        run: cargo check -p rlnc-simdx --target wasm32-unknown-unknown --no-default-features --features alloc
+      - name: Check wasm32-wasip1 SIMD128 with std
+        env:
+          RUSTFLAGS: "-C target-feature=+simd128"
+        run: cargo check -p rlnc-simdx --target wasm32-wasip1
+
+  embedded:
+    name: Embedded zero-feature core
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: thumbv7em-none-eabihf
+      - run: cargo check -p rlnc-simdx --target thumbv7em-none-eabihf --no-default-features
+
+  lint:
+    name: Formatting and Clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+      - name: Clippy all workspace targets and features
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+
+  msrv:
+    name: MSRV (Rust 1.89)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.89
+      - run: cargo check -p rlnc-simdx --all-features
