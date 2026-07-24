@@ -1,0 +1,18 @@
+[package]
+name = "rlnc-simdx-mt-benchmark"
+description = "Autotuned multithreaded scalar vs SIMD RLNC throughput benchmark"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+publish = false
+
+[[bin]]
+name = "mt_benchmark"
+path = "src/main.rs"
+
+[dependencies]
+rayon = "1.10"
+rlnc-simdx = { path = "../rlnc-simdx", features = ["std", "alloc", "bench-internals"] }

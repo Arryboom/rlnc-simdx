@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Added the `rlnc-simdx-mt-benchmark` workspace package. It uses Rayon to run
+  independent RLNC generations in parallel and autotunes scalar and SIMD worker
+  counts separately for encode and decode across `k = 8, 16, 32` and symbol
+  sizes from 64 B through 64 KiB.
+- Added deterministic full-rank fixtures and benchmark correctness tests so the
+  scalar and SIMD backends share identical RLNC, memory, and threading work.
+- Added CI release-mode smoke coverage and included `mt_benchmark` alongside
+  `bench_standalone` in every native GitHub Release archive.
+
 ### Fixed
 
 - Fixed AArch64 `std` runtime dispatch compilation by importing the crate-private

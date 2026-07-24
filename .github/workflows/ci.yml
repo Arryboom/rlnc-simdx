@@ -19,6 +19,23 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - run: cargo test --workspace
 
+  mt_benchmark:
+    name: Autotuned multithreaded benchmark
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Test benchmark correctness and autotuner
+        run: cargo test --locked -p rlnc-simdx-mt-benchmark
+      - name: Build release benchmark
+        run: cargo build --release --locked -p rlnc-simdx-mt-benchmark --bin mt_benchmark
+      - name: Run bounded release-mode smoke benchmark
+        run: |
+          ./target/release/mt_benchmark --quick --max-threads 2 >mt_benchmark.out
+          grep -q '^Encode$' mt_benchmark.out
+          grep -q '^Decode$' mt_benchmark.out
+          test "$(grep -Ec '^(8|16|32)[[:space:]]' mt_benchmark.out)" -eq 30
+
   library_features:
     name: Library feature gates
     runs-on: ubuntu-latest
@@ -145,4 +162,4 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.89
-      - run: cargo check -p rlnc-simdx --all-features
+      - run: cargo check --locked --workspace --all-targets --all-features

@@ -1,5 +1,5 @@
 [workspace]
-members = ["rlnc-simdx", "rlnc-simdx-bench"]
+members = ["rlnc-simdx", "rlnc-simdx-bench", "mt_benchmark"]
 resolver = "2"
 
 [workspace.package]

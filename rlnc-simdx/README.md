@@ -142,19 +142,38 @@ CPUs with **GFNI** (Ice Lake+, Zen 4+) usually report `gfni+avx2` or
 
 ### Run benchmarks
 
+The focused multithreaded benchmark compares scalar and runtime-dispatched SIMD
+encode/decode throughput using the same RLNC pipeline and Rayon parallelism:
+
+```bash
+cargo run --release -p rlnc-simdx-mt-benchmark
+
+# Short run, considering at most two worker threads
+cargo run --release -p rlnc-simdx-mt-benchmark -- --quick --max-threads 2
+```
+
+It covers `k = 8, 16, 32` and symbol sizes `64 B, 1 KiB, 4 KiB, 16 KiB,
+64 KiB`. Scalar and SIMD worker counts are autotuned independently for each
+workload and operation. Results are reported as separate compact Encode and
+Decode tables containing GiB/s, selected worker counts, and SIMD speedup.
+Thread-pool construction, fixture creation, and reusable worker-state allocation
+are outside timed samples. See the
+[`mt_benchmark` guide](https://github.com/arryboom/rlnc-simdx/blob/main/mt_benchmark/README.md)
+for the measurement model.
+
+The portable standalone kernel benchmark remains available:
+
 ```bash
 cargo build --release -p rlnc-simdx-bench --bin bench_standalone
 
 # Windows
-target\release\bench_standalone.exe
 target\release\bench_standalone.exe --quick
-target\release\bench_standalone.exe --csv
 
 # Linux / macOS
-./target/release/bench_standalone
+./target/release/bench_standalone --quick
 ```
 
-You can copy the release binary to another machine with the same OS and
+You can copy either release binary to another machine with the same OS and
 architecture without installing Rust.
 
 Criterion HTML reports are written under `target/criterion/`:
@@ -227,9 +246,9 @@ tag version to match the inherited Cargo workspace version and publishes:
 - `rlnc-simdx-bench-1.1.0-x86_64-apple-darwin.tar.gz`
 - `SHA256SUMS`
 
-Each native archive contains `bench_standalone` (or
-`bench_standalone.exe`), `README.md`, and `LICENSE`. Download all assets into
-one directory and verify them against the sorted manifest:
+Each native archive contains `bench_standalone` and `mt_benchmark` (with `.exe`
+on Windows), plus `README.md` and `LICENSE`. Download all assets into one
+directory and verify them against the sorted manifest:
 
 ```bash
 # Linux (or macOS with GNU coreutils)
@@ -255,6 +274,7 @@ release details.
 ```text
 rlnc-simdx/           # publishable library package (import: rlnc_simdx)
 rlnc-simdx-bench/     # Criterion suites and portable bench_standalone binary
+mt_benchmark/         # Rayon-autotuned scalar vs SIMD encode/decode benchmark
 plans/                # architecture, review, and historical design notes
 ```
 
