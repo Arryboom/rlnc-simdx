@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed AArch64 `std` runtime dispatch compilation by importing the crate-private
+  ARM kernel module inside the runtime dispatcher. AArch64 now selects mandatory
+  NEON cleanly in both normal and `+sve` builds; scalar fallback code is cfg-gated
+  away on AArch64, and the target-specific dispatch test asserts `neon (tier7)`.
+
 ## [1.1.0] — 2026-07-24
 
 ### Security

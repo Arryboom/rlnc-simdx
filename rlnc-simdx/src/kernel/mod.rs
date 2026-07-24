@@ -109,12 +109,13 @@ pub(crate) struct KernelSet {
 
 #[cfg(feature = "std")]
 mod runtime {
+    #[cfg(target_arch = "aarch64")]
+    use super::arm;
     #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
     use super::x86;
-    use super::{
-        scalar_axpy_wrapper, scalar_scale_inplace_wrapper, scalar_scale_wrapper, AxpyFn, KernelSet,
-        ScaleFn, ScaleInplaceFn,
-    };
+    #[cfg(not(target_arch = "aarch64"))]
+    use super::{scalar_axpy_wrapper, scalar_scale_inplace_wrapper, scalar_scale_wrapper};
+    use super::{AxpyFn, KernelSet, ScaleFn, ScaleInplaceFn};
     use std::sync::OnceLock;
 
     static KERNEL: OnceLock<KernelSet> = OnceLock::new();
@@ -212,6 +213,9 @@ mod runtime {
         // Runtime feature detection is unavailable on wasm32; compile-time path.
 
         // ── Scalar fallback ──────────────────────────────────────────────────
+        // AArch64 returned the mandatory NEON kernel above, so compiling this
+        // fallback there would only create unreachable-code/dead-import noise.
+        #[cfg(not(target_arch = "aarch64"))]
         KernelSet {
             axpy: scalar_axpy_wrapper as AxpyFn,
             scale: scalar_scale_wrapper as ScaleFn,
@@ -225,14 +229,17 @@ mod runtime {
 // Thin wrappers so scalar fns have the right unsafe fn signature
 // ---------------------------------------------------------------------------
 
+#[cfg(all(feature = "std", not(target_arch = "aarch64")))]
 unsafe fn scalar_axpy_wrapper(c: u8, x: &[u8], y: &mut [u8]) {
     scalar::axpy(c, x, y);
 }
 
+#[cfg(all(feature = "std", not(target_arch = "aarch64")))]
 unsafe fn scalar_scale_wrapper(c: u8, x: &[u8], y: &mut [u8]) {
     scalar::scale(c, x, y);
 }
 
+#[cfg(all(feature = "std", not(target_arch = "aarch64")))]
 unsafe fn scalar_scale_inplace_wrapper(c: u8, y: &mut [u8]) {
     scalar::scale_inplace(c, y);
 }
@@ -618,10 +625,10 @@ mod tests {
     #[test]
     #[cfg(feature = "std")]
     fn runtime_dispatch_selects_best() {
-        // The selected kernel name should reflect what is actually available
-        let name = active_kernel_name();
+        // The selected kernel name should reflect what is actually available.
         #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
         {
+            let name = active_kernel_name();
             if is_x86_feature_detected!("gfni") && is_x86_feature_detected!("avx512f") {
                 assert!(name.contains("tier1"), "Expected tier1, got: {name}");
             } else if is_x86_feature_detected!("gfni") && is_x86_feature_detected!("avx2") {
@@ -636,5 +643,11 @@ mod tests {
                 );
             }
         }
+
+        #[cfg(target_arch = "aarch64")]
+        assert_eq!(active_kernel_name(), "neon (tier7)");
+
+        #[cfg(not(any(target_arch = "x86", target_arch = "x86_64", target_arch = "aarch64")))]
+        assert!(!active_kernel_name().is_empty());
     }
 }

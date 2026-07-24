@@ -12,6 +12,10 @@
 //!
 //! Do not call these stubs from production code.
 
+// These placeholders intentionally remain unreferenced until a correct SVE
+// implementation is wired into dispatch.
+#![allow(dead_code)]
+
 /// Placeholder — SVE AXPY is not production-ready.
 ///
 /// # Panics
