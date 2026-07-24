@@ -1,0 +1,29 @@
+[package]
+name        = "rlnc-simdx"
+description = "SIMD-accelerated Random Linear Network Coding over GF(2^8) — no_std, maximum SIMD"
+version.workspace     = true
+edition.workspace     = true
+rust-version.workspace = true
+license.workspace     = true
+authors.workspace     = true
+repository.workspace  = true
+keywords    = ["rlnc", "network-coding", "simd", "galois-field", "no-std"]
+categories  = ["algorithms", "encoding", "no-std"]
+readme      = "README.md"
+include     = ["src/**", "Cargo.toml", "README.md", "LICENSE"]
+
+[lib]
+name = "rlnc_simdx"
+path = "src/lib.rs"
+
+[dependencies]
+# Zero mandatory runtime dependencies — keeps no_std clean
+
+[features]
+default         = ["alloc", "std"]
+alloc           = []
+std             = ["alloc"]
+# Unstable implementation details used only by this workspace's benchmarks.
+bench-internals = []
+
+[dev-dependencies]

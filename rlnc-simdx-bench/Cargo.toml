@@ -1,0 +1,37 @@
+[package]
+name        = "rlnc-simdx-bench"
+description = "Benchmarks for rlnc-simdx — Criterion + portable standalone GB/s binary"
+version.workspace     = true
+edition.workspace     = true
+rust-version.workspace = true
+license.workspace     = true
+authors.workspace     = true
+repository.workspace  = true
+publish     = false
+
+# Portable binary: cargo build --release -p rlnc-simdx-bench --bin bench_standalone
+[[bin]]
+name = "bench_standalone"
+path = "src/bin/bench_standalone.rs"
+
+[[bench]]
+name    = "gf_mul"
+harness = false
+
+[[bench]]
+name    = "axpy"
+harness = false
+
+[[bench]]
+name    = "encode"
+harness = false
+
+[[bench]]
+name    = "decode"
+harness = false
+
+[dependencies]
+rlnc-simdx = { path = "../rlnc-simdx", features = ["std", "alloc", "bench-internals"] }
+
+[dev-dependencies]
+criterion = { version = "0.5", features = ["html_reports"] }

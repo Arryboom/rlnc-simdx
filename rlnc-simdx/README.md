@@ -1,0 +1,231 @@
+# rlnc-simdx
+
+**SIMD-accelerated Random Linear Network Coding over GF(2⁸)**
+
+Author: **[arryboom](https://github.com/arryboom)** · MSRV 1.89 · License [Apache-2.0](LICENSE) · v0.1.0
+
+Crate package: **`rlnc-simdx`** · Rust import: **`rlnc_simdx`**
+
+`no_std`-friendly · zero mandatory dependencies · safe public API · automatic CPU dispatch
+(GFNI / AVX-512 / AVX2 / SSSE3 / NEON / WASM SIMD128)
+
+**~55–62 GB/s** AXPY on AMD Ryzen 7 5800X3D (dual DDR4, AVX2 path) — about **25–29×** faster than scalar.
+
+---
+
+## Install
+
+```toml
+# Cargo.toml
+[dependencies]
+rlnc-simdx = "0.1"
+
+# From this repository's workspace root instead:
+# rlnc-simdx = { path = "rlnc-simdx" }
+```
+
+The default features are `std` and `alloc`. Use `default-features = false` for the
+zero-allocation core, or enable only `alloc` for heap-backed APIs without `std`.
+
+---
+
+## Quick start
+
+### Encode → decode a generation
+
+```rust
+use rlnc_simdx::{Decoder, Encoder, RlncError};
+
+fn main() -> Result<(), RlncError> {
+    let k = 4;   // generation size (number of source symbols)
+    let n = 128; // bytes per symbol
+
+    let source: Vec<Vec<u8>> = (0..k).map(|i| vec![i as u8; n]).collect();
+    let source_refs: Vec<&[u8]> = source.iter().map(Vec::as_slice).collect();
+
+    let encoder = Encoder::new(k, n)?;
+    let mut decoder = Decoder::new(k, n)?;
+
+    // Systematic packets make this compact example deterministic. Applications
+    // can use Encoder::encode_random with SimpleRng or their own coefficients.
+    for index in 0..k {
+        let packet = encoder.encode_systematic(&source_refs, index)?;
+        decoder.receive(packet)?;
+    }
+
+    let decoded = decoder.decode()?.expect("decoder has full rank");
+    assert_eq!(decoded, source);
+    Ok(())
+}
+```
+
+### Low-level GF kernels (still safe — no `unsafe` in your code)
+
+```rust
+use rlnc_simdx::kernel;
+
+let x = [1u8, 2, 3, 4];
+let mut y = [0u8; 4];
+
+kernel::axpy(0x03, &x, &mut y);      // y[i] ^= c * x[i]; buffers must not overlap
+kernel::scale(0x03, &x, &mut y);     // y[i]  = c * x[i]; buffers must not overlap
+kernel::scale_inplace(0x03, &mut y); // y[i]  = c * y[i]
+```
+
+Check which SIMD path is active:
+
+```rust
+println!("kernel: {}", rlnc_simdx::active_kernel());
+// e.g. "avx2+ssse3 (tier5)" or "gfni+avx512 (tier1)"
+```
+
+---
+
+## What you get
+
+| | |
+|--|--|
+| **Heap API (`alloc`)** | `Encoder` · `Decoder` · `Recoder` · `CodedPacket` · `GfMatrix` · `AlignedBuffer` |
+| **Zero-allocation API** | `Gf8` · `RlncError` · safe `kernel` operations · `active_kernel()` |
+| **Field** | GF(2⁸), AES polynomial `0x11B` (same field as Intel GFNI hardware) |
+| **SIMD** | Picked automatically at runtime with `std`; compile-time selection without `std` |
+| **Safety** | Public kernels check length and non-overlap in release builds and panic on misuse |
+| **Dependencies** | None |
+| **Tests** | 91 unit tests + 3 doctests |
+
+SVE is experimental and intentionally not part of production dispatch. AArch64
+uses the production NEON kernel. The SVE module remains crate-private until a
+correct vector-length-agnostic implementation is hardware-tested.
+
+---
+
+## Performance
+
+Reference machine:
+
+| | |
+|--|--|
+| CPU | AMD Ryzen 7 **5800X3D** |
+| RAM | Dual-channel **DDR4** |
+| Kernel | `avx2+ssse3 (tier5)` (no GFNI / no AVX-512 on this SKU) |
+| Tool | `bench_standalone`, SI GB/s, aligned buffers |
+
+### AXPY `y ^= c·x` — dispatch vs scalar
+
+| Size | Scalar | SIMD dispatch | Speedup |
+|------|--------|---------------|---------|
+| 1 KiB | ~2.2 GB/s | ~41 GB/s | ~19× |
+| 16 KiB | ~2.2 GB/s | **~62 GB/s** | **~29×** |
+| 64 KiB | ~2.2 GB/s | **~60 GB/s** | **~28×** |
+| 1 MiB | ~2.2 GB/s | **~55 GB/s** | **~25×** |
+
+### SCALE `y = c·x`
+
+| Size | SIMD dispatch (typical) |
+|------|-------------------------|
+| 16 KiB | ~70 GB/s (~28× scalar) |
+| 1 MiB | ~55 GB/s (~22× scalar) |
+
+Mid sizes can vary run-to-run due to clocks and cache state. Prefer several runs
+for published measurements.
+
+### Encode (k = 16 random symbols)
+
+| Symbol size | ≈ Time / packet | Payload throughput |
+|-------------|-----------------|--------------------|
+| 1 KiB | ~500 ns | ~2.0 GB/s |
+| 16 KiB | ~5 µs | ~3.2 GB/s |
+| 64 KiB | ~24 µs | ~2.7 GB/s |
+
+CPUs with **GFNI** (Ice Lake+, Zen 4+) usually report `gfni+avx2` or
+`gfni+avx512` and higher throughput.
+
+### Run benchmarks
+
+```bash
+cargo build --release -p rlnc-simdx-bench --bin bench_standalone
+
+# Windows
+target\release\bench_standalone.exe
+target\release\bench_standalone.exe --quick
+target\release\bench_standalone.exe --csv
+
+# Linux / macOS
+./target/release/bench_standalone
+```
+
+You can copy the release binary to another machine with the same OS and
+architecture without installing Rust.
+
+Criterion HTML reports are written under `target/criterion/`:
+
+```bash
+cargo bench -p rlnc-simdx-bench --bench axpy
+cargo bench -p rlnc-simdx-bench --bench decode
+```
+
+The workspace benchmark package enables the explicitly unstable
+`bench-internals` feature to compare scalar internals with the supported safe
+kernel API. Applications should not enable that feature.
+
+---
+
+## Safety model
+
+```text
+Your application (safe Rust)
+    → Encoder / Decoder / kernel::axpy | scale | scale_inplace
+           → crate-private dispatch and SIMD implementations
+```
+
+- **Do:** use equal-length, non-overlapping slices for `axpy` and `scale`.
+- **Do:** use `scale_inplace` when multiplying a buffer by a scalar in place.
+- **Don't:** treat this crate as encryption or constant-time cryptography.
+- **Don't:** use `SimpleRng` as a CSPRNG; it is a small LFSR for coding coefficients.
+
+---
+
+## Build and test
+
+```bash
+cargo test --workspace
+cargo test -p rlnc-simdx --all-features
+cargo check -p rlnc-simdx --no-default-features                    # zero-allocation core
+cargo check -p rlnc-simdx --no-default-features --features alloc   # no_std + alloc
+```
+
+### Cargo features (`rlnc-simdx`)
+
+| Feature | Default | Meaning |
+|---------|---------|---------|
+| `alloc` | ✓ | Heap APIs: aligned buffers, matrix, encoder, decoder, and recoder |
+| `std` | ✓ | Runtime CPU dispatch; implies `alloc` |
+| `bench-internals` | | Unstable scalar internals for this workspace's benchmarks only |
+
+With no features, `field`, `error`, `kernel`, and `active_kernel()` remain
+available and do not require a global allocator.
+
+---
+
+## Project layout
+
+```text
+rlnc-simdx/           # publishable library package (import: rlnc_simdx)
+rlnc-simdx-bench/     # Criterion suites and portable bench_standalone binary
+plans/                # architecture, review, and historical design notes
+```
+
+Deeper design and release notes:
+[architecture](https://github.com/arryboom/rlnc-simdx/blob/main/plans/architecture.md) ·
+[changelog](https://github.com/arryboom/rlnc-simdx/blob/main/CHANGELOG.md)
+
+---
+
+## Author
+
+**arryboom** — [https://github.com/arryboom](https://github.com/arryboom)
+
+## License
+
+Licensed under the [Apache License, Version 2.0](LICENSE)
+([SPDX: Apache-2.0](https://spdx.org/licenses/Apache-2.0.html)).

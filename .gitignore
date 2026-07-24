@@ -1,0 +1,18 @@
+# Cargo build artifacts
+/target/
+/scripts/
+
+# Local benchmark and profiling output
+/criterion/
+*.profraw
+*.profdata
+
+# Editor and OS metadata
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Local scratch files
+*.tmp
+*.bak
