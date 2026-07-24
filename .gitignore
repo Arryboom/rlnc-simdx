@@ -1,5 +1,6 @@
 # Cargo build artifacts
 /target/
+/plans/
 /scripts/
 
 # Local benchmark and profiling output

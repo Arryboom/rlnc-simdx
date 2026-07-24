@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.1.0] — 2026-07-24
+
 ### Security
 
 - **H1:** [`AlignedBuffer::new_uninit`](rlnc-simdx/src/aligned.rs) is **`pub(crate)` only** —
@@ -51,6 +53,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Automated GitHub releases now publish the source crate and native Linux, Windows,
+  and macOS benchmark archives with a sorted `SHA256SUMS` manifest and per-asset hashes.
 - [`kernel::scale_inplace`](rlnc-simdx/src/kernel/mod.rs) — SIMD in-place scale via dispatch.
 - [`kernel::axpy_multi`](rlnc-simdx/src/kernel/mod.rs) — cache-blocked multi-source AXPY for encode.
 - [`AlignedBuffer`](rlnc-simdx/src/aligned.rs) — 64-byte aligned storage; used by packets & matrix.
@@ -137,7 +141,7 @@ Initial release. Full RLNC over GF(2⁸) with multi-tier SIMD on x86_64, AArch64
 **Matrix / Encoder / Decoder / Recoder / Error** — see architecture plan.
 
 **`no_std` (historical 0.1.0 claim):** zero mandatory deps; `alloc` / `std`
-features. The originally stated MSRV 1.79 was corrected to 1.89 under Unreleased.
+features. The originally stated MSRV 1.79 was corrected to 1.89 in 1.1.0.
 
 #### Build / bench / CI
 
@@ -150,5 +154,6 @@ features. The originally stated MSRV 1.79 was corrected to 1.89 under Unreleased
 - Historical `build.rs` safe `__cpuid_count` usage
 - Early decoder/recoder borrow and import cleanups
 
-[Unreleased]: https://github.com/arryboom/rlnc-simdx/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/arryboom/rlnc-simdx/compare/v1.1.0...HEAD
+[1.1.0]: https://github.com/arryboom/rlnc-simdx/compare/v0.1.0...v1.1.0
 [0.1.0]: https://github.com/arryboom/rlnc-simdx/releases/tag/v0.1.0

@@ -2,7 +2,7 @@
 
 **SIMD-accelerated Random Linear Network Coding over GF(2⁸)**
 
-Author: **[arryboom](https://github.com/arryboom)** · MSRV 1.89 · License [Apache-2.0](LICENSE) · v0.1.0
+Author: **[arryboom](https://github.com/arryboom)** · MSRV 1.89 · License [Apache-2.0](LICENSE) · v1.1.0
 
 Crate package: **`rlnc-simdx`** · Rust import: **`rlnc_simdx`**
 
@@ -18,7 +18,7 @@ Crate package: **`rlnc-simdx`** · Rust import: **`rlnc_simdx`**
 ```toml
 # Cargo.toml
 [dependencies]
-rlnc-simdx = "0.1"
+rlnc-simdx = "1.1"
 
 # From this repository's workspace root instead:
 # rlnc-simdx = { path = "rlnc-simdx" }
@@ -204,6 +204,49 @@ cargo check -p rlnc-simdx --no-default-features --features alloc   # no_std + al
 
 With no features, `field`, `error`, `kernel`, and `active_kernel()` remain
 available and do not require a global allocator.
+
+---
+
+## Releasing and release verification
+
+Maintainers create and push a signed semantic-version tag after updating the
+workspace version, lockfile, changelog, and synchronized READMEs:
+
+```bash
+git tag -s v1.1.0
+git push origin v1.1.0
+```
+
+The tag push runs the release workflow. A manual workflow dispatch may rerun an
+existing tag idempotently; it does not create the tag. The workflow requires the
+tag version to match the inherited Cargo workspace version and publishes:
+
+- `rlnc-simdx-1.1.0.crate`
+- `rlnc-simdx-bench-1.1.0-x86_64-unknown-linux-gnu.tar.gz`
+- `rlnc-simdx-bench-1.1.0-x86_64-pc-windows-msvc.zip`
+- `rlnc-simdx-bench-1.1.0-x86_64-apple-darwin.tar.gz`
+- `SHA256SUMS`
+
+Each native archive contains `bench_standalone` (or
+`bench_standalone.exe`), `README.md`, and `LICENSE`. Download all assets into
+one directory and verify them against the sorted manifest:
+
+```bash
+# Linux (or macOS with GNU coreutils)
+sha256sum -c SHA256SUMS
+
+# macOS fallback
+shasum -a 256 -c SHA256SUMS
+```
+
+```powershell
+# PowerShell: compare these hashes with SHA256SUMS
+Get-ChildItem rlnc-simdx-* | Get-FileHash -Algorithm SHA256
+```
+
+Release notes also contain the commit SHA and a per-asset SHA-256 table. See the
+[changelog](https://github.com/arryboom/rlnc-simdx/blob/main/CHANGELOG.md) for
+release details.
 
 ---
 
