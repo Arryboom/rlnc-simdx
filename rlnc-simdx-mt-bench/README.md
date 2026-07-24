@@ -1,4 +1,4 @@
-# mt_benchmark
+# rlnc-simdx-mt-bench
 
 Autotuned multithreaded encode/decode throughput comparison for `rlnc-simdx`.
 
@@ -27,18 +27,25 @@ encoded source bytes per complete generation.
 ## Run
 
 ```bash
-cargo run --release -p rlnc-simdx-mt-benchmark
+cargo run --release -p rlnc-simdx-mt-bench
 ```
 
 Short CI-style run with at most two workers:
 
 ```bash
-cargo run --release -p rlnc-simdx-mt-benchmark -- --quick --max-threads 2
+cargo run --release -p rlnc-simdx-mt-bench -- --quick --max-threads 2
 ```
 
-The program prints separate compact Encode and Decode tables. Each row contains
+The program starts with a portable ASCII metadata panel containing the benchmark
+version, host OS/architecture, logical CPU count, active runtime SIMD kernel,
+autotuning range, mode, workload matrix, throughput definition, and timing scope.
+
+Encode and Decode use separate ASCII tables. Rows are flushed as soon as each
+workload completes, so long full runs show continuous progress. Each row contains
 scalar GiB/s and selected worker count, SIMD GiB/s and selected worker count,
-and SIMD/scalar speedup. Autotuning progress is intentionally not printed.
+and SIMD/scalar speedup. Every table ends with peak scalar throughput, peak SIMD
+throughput, and best-speedup summaries; the report ends with total elapsed time.
+Autotuning trial details are intentionally not printed.
 
 ## Autotuning
 

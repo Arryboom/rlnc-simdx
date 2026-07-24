@@ -1,5 +1,5 @@
 [package]
-name = "rlnc-simdx-mt-benchmark"
+name = "rlnc-simdx-mt-bench"
 description = "Autotuned multithreaded scalar vs SIMD RLNC throughput benchmark"
 version.workspace = true
 edition.workspace = true
@@ -10,7 +10,7 @@ repository.workspace = true
 publish = false
 
 [[bin]]
-name = "mt_benchmark"
+name = "rlnc-simdx-mt-bench"
 path = "src/main.rs"
 
 [dependencies]

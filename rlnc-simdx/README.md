@@ -2,7 +2,7 @@
 
 **SIMD-accelerated Random Linear Network Coding over GF(2⁸)**
 
-Author: **[arryboom](https://github.com/arryboom)** · MSRV 1.89 · License [Apache-2.0](LICENSE) · v1.1.0
+Author: **[arryboom](https://github.com/arryboom)** · MSRV 1.89 · License [Apache-2.0](LICENSE) · v1.2.0
 
 Crate package: **`rlnc-simdx`** · Rust import: **`rlnc_simdx`**
 
@@ -18,7 +18,7 @@ Crate package: **`rlnc-simdx`** · Rust import: **`rlnc_simdx`**
 ```toml
 # Cargo.toml
 [dependencies]
-rlnc-simdx = "1.1"
+rlnc-simdx = "1.2"
 
 # From this repository's workspace root instead:
 # rlnc-simdx = { path = "rlnc-simdx" }
@@ -146,19 +146,21 @@ The focused multithreaded benchmark compares scalar and runtime-dispatched SIMD
 encode/decode throughput using the same RLNC pipeline and Rayon parallelism:
 
 ```bash
-cargo run --release -p rlnc-simdx-mt-benchmark
+cargo run --release -p rlnc-simdx-mt-bench
 
 # Short run, considering at most two worker threads
-cargo run --release -p rlnc-simdx-mt-benchmark -- --quick --max-threads 2
+cargo run --release -p rlnc-simdx-mt-bench -- --quick --max-threads 2
 ```
 
 It covers `k = 8, 16, 32` and symbol sizes `64 B, 1 KiB, 4 KiB, 16 KiB,
 64 KiB`. Scalar and SIMD worker counts are autotuned independently for each
-workload and operation. Results are reported as separate compact Encode and
-Decode tables containing GiB/s, selected worker counts, and SIMD speedup.
+workload and operation. A portable ASCII metadata panel reports the active SIMD
+kernel, host platform, logical CPUs, mode, tuning range, and measurement scope.
+Encode and Decode use separate tables; rows stream as workloads complete, and
+each table ends with peak-throughput and best-speedup summaries.
 Thread-pool construction, fixture creation, and reusable worker-state allocation
 are outside timed samples. See the
-[`mt_benchmark` guide](https://github.com/arryboom/rlnc-simdx/blob/main/mt_benchmark/README.md)
+[`rlnc-simdx-mt-bench` guide](https://github.com/arryboom/rlnc-simdx/blob/main/rlnc-simdx-mt-bench/README.md)
 for the measurement model.
 
 The portable standalone kernel benchmark remains available:
@@ -232,22 +234,22 @@ Maintainers create and push a signed semantic-version tag after updating the
 workspace version, lockfile, changelog, and synchronized READMEs:
 
 ```bash
-git tag -s v1.1.0
-git push origin v1.1.0
+git tag -s v1.2.0
+git push origin v1.2.0
 ```
 
 The tag push runs the release workflow. A manual workflow dispatch may rerun an
 existing tag idempotently; it does not create the tag. The workflow requires the
 tag version to match the inherited Cargo workspace version and publishes:
 
-- `rlnc-simdx-1.1.0.crate`
-- `rlnc-simdx-bench-1.1.0-x86_64-unknown-linux-gnu.tar.gz`
-- `rlnc-simdx-bench-1.1.0-x86_64-pc-windows-msvc.zip`
-- `rlnc-simdx-bench-1.1.0-x86_64-apple-darwin.tar.gz`
+- `rlnc-simdx-1.2.0.crate`
+- `rlnc-simdx-bench-1.2.0-x86_64-unknown-linux-gnu.tar.gz`
+- `rlnc-simdx-bench-1.2.0-x86_64-pc-windows-msvc.zip`
+- `rlnc-simdx-bench-1.2.0-x86_64-apple-darwin.tar.gz`
 - `SHA256SUMS`
 
-Each native archive contains `bench_standalone` and `mt_benchmark` (with `.exe`
-on Windows), plus `README.md` and `LICENSE`. Download all assets into one
+Each native archive contains `bench_standalone` and `rlnc-simdx-mt-bench` (with
+`.exe` on Windows), plus `README.md` and `LICENSE`. Download all assets into one
 directory and verify them against the sorted manifest:
 
 ```bash
@@ -272,10 +274,10 @@ release details.
 ## Project layout
 
 ```text
-rlnc-simdx/           # publishable library package (import: rlnc_simdx)
-rlnc-simdx-bench/     # Criterion suites and portable bench_standalone binary
-mt_benchmark/         # Rayon-autotuned scalar vs SIMD encode/decode benchmark
-plans/                # architecture, review, and historical design notes
+rlnc-simdx/             # publishable library package (import: rlnc_simdx)
+rlnc-simdx-bench/       # Criterion suites and portable bench_standalone binary
+rlnc-simdx-mt-bench/    # Rayon-autotuned scalar vs SIMD encode/decode benchmark
+plans/                  # architecture, review, and historical design notes
 ```
 
 Deeper design and release notes:

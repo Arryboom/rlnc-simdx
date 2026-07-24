@@ -9,16 +9,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.2.0] — 2026-07-24
+
 ### Added
 
-- Added the `rlnc-simdx-mt-benchmark` workspace package. It uses Rayon to run
+- Added the `rlnc-simdx-mt-bench` workspace package. It uses Rayon to run
   independent RLNC generations in parallel and autotunes scalar and SIMD worker
   counts separately for encode and decode across `k = 8, 16, 32` and symbol
   sizes from 64 B through 64 KiB.
 - Added deterministic full-rank fixtures and benchmark correctness tests so the
   scalar and SIMD backends share identical RLNC, memory, and threading work.
-- Added CI release-mode smoke coverage and included `mt_benchmark` alongside
-  `bench_standalone` in every native GitHub Release archive.
+- Added CI release-mode smoke coverage and included `rlnc-simdx-mt-bench`
+  alongside `bench_standalone` in every native GitHub Release archive.
+- Added a portable ASCII benchmark report with host/kernel metadata, streaming
+  workload rows, per-operation peak-throughput and speedup summaries, and total
+  elapsed time.
+
+### Changed
+
+- Standardized the multithreaded benchmark directory, Cargo package, executable,
+  Rust import, CI job, documentation, and release archive entry on the canonical
+  `rlnc-simdx-mt-bench` name.
 
 ### Fixed
 
@@ -172,6 +183,7 @@ features. The originally stated MSRV 1.79 was corrected to 1.89 in 1.1.0.
 - Historical `build.rs` safe `__cpuid_count` usage
 - Early decoder/recoder borrow and import cleanups
 
-[Unreleased]: https://github.com/arryboom/rlnc-simdx/compare/v1.1.0...HEAD
+[Unreleased]: https://github.com/arryboom/rlnc-simdx/compare/v1.2.0...HEAD
+[1.2.0]: https://github.com/arryboom/rlnc-simdx/compare/v1.1.0...v1.2.0
 [1.1.0]: https://github.com/arryboom/rlnc-simdx/compare/v0.1.0...v1.1.0
 [0.1.0]: https://github.com/arryboom/rlnc-simdx/releases/tag/v0.1.0

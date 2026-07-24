@@ -19,22 +19,24 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - run: cargo test --workspace
 
-  mt_benchmark:
+  mt_bench:
     name: Autotuned multithreaded benchmark
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - name: Test benchmark correctness and autotuner
-        run: cargo test --locked -p rlnc-simdx-mt-benchmark
+        run: cargo test --locked -p rlnc-simdx-mt-bench
       - name: Build release benchmark
-        run: cargo build --release --locked -p rlnc-simdx-mt-benchmark --bin mt_benchmark
+        run: cargo build --release --locked -p rlnc-simdx-mt-bench --bin rlnc-simdx-mt-bench
       - name: Run bounded release-mode smoke benchmark
         run: |
-          ./target/release/mt_benchmark --quick --max-threads 2 >mt_benchmark.out
-          grep -q '^Encode$' mt_benchmark.out
-          grep -q '^Decode$' mt_benchmark.out
-          test "$(grep -Ec '^(8|16|32)[[:space:]]' mt_benchmark.out)" -eq 30
+          ./target/release/rlnc-simdx-mt-bench --quick --max-threads 2 >rlnc-simdx-mt-bench.out
+          grep -q '^| Active kernel ' rlnc-simdx-mt-bench.out
+          grep -q '^Encode$' rlnc-simdx-mt-bench.out
+          grep -q '^Decode$' rlnc-simdx-mt-bench.out
+          test "$(grep -c '^Summary$' rlnc-simdx-mt-bench.out)" -eq 2
+          test "$(grep -Ec '^\|[[:space:]]+(8|16|32)[[:space:]]+\|' rlnc-simdx-mt-bench.out)" -eq 30
 
   library_features:
     name: Library feature gates
