@@ -53,7 +53,7 @@ impl Gf8 {
     #[must_use]
     pub fn pow(self, exp: u32) -> Self {
         if self.0 == 0 {
-            return Gf8(0);
+            return if exp == 0 { Gf8::ONE } else { Gf8::ZERO };
         }
         let l = u32::from(LOG[self.0 as usize]);
         let idx = ((l * (exp % 255)) % 255) as usize;
@@ -137,7 +137,7 @@ impl Div for Gf8 {
     /// Panics if `rhs == 0`.
     #[inline(always)]
     fn div(self, rhs: Self) -> Self {
-        debug_assert!(rhs.0 != 0, "division by zero in GF(2^8)");
+        assert!(rhs.0 != 0, "division by zero in GF(2^8)");
         self * rhs.inv()
     }
 }
@@ -251,11 +251,19 @@ mod tests {
 
     #[test]
     fn pow_known_values() {
+        assert_eq!(Gf8::ZERO.pow(0), Gf8::ONE);
+        assert_eq!(Gf8::ZERO.pow(1), Gf8::ZERO);
         // g^1 = 0x03 (generator)
         assert_eq!(Gf8(0x03).pow(1), Gf8(0x03));
         // Any non-zero element raised to 255 == 1
         for x in 1u8..=255 {
             assert_eq!(Gf8(x).pow(255), Gf8::ONE, "x^255 != 1 for x=0x{x:02x}");
         }
+    }
+
+    #[test]
+    #[should_panic(expected = "division by zero")]
+    fn division_by_zero_panics_in_all_profiles() {
+        let _ = Gf8::ONE / Gf8::ZERO;
     }
 }

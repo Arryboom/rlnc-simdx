@@ -197,7 +197,7 @@ fn main() {
     }
 
     for &size in DEFAULT_SIZES {
-        let x = AlignedBuffer::from_slice(&(0u8..).take(size).collect::<Vec<_>>());
+        let x = AlignedBuffer::from_slice(&(0..size).map(|index| index as u8).collect::<Vec<_>>());
         let y_seed = AlignedBuffer::from_slice(
             &(0..size)
                 .map(|i| (i as u8).wrapping_mul(3))
@@ -234,7 +234,7 @@ fn main() {
     }
 
     for &size in DEFAULT_SIZES {
-        let x = AlignedBuffer::from_slice(&(0u8..).take(size).collect::<Vec<_>>());
+        let x = AlignedBuffer::from_slice(&(0..size).map(|index| index as u8).collect::<Vec<_>>());
         let mut y = AlignedBuffer::zeroed(size);
 
         let mut scalar_ns = None;

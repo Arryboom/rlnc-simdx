@@ -186,8 +186,9 @@ cargo bench -p rlnc-simdx-bench --bench decode
 ```
 
 The workspace benchmark package enables the explicitly unstable
-`bench-internals` feature to compare scalar internals with the supported safe
-kernel API. Applications should not enable that feature.
+`bench-internals` feature to compare scalar and CPU-validated direct-tier
+internals with the supported safe kernel API. Applications should not enable
+that feature.
 
 ---
 
@@ -221,7 +222,7 @@ cargo check -p rlnc-simdx --no-default-features --features alloc   # no_std + al
 |---------|---------|---------|
 | `alloc` | ✓ | Heap APIs: aligned buffers, matrix, encoder, decoder, and recoder |
 | `std` | ✓ | Runtime CPU dispatch; implies `alloc` |
-| `bench-internals` | | Unstable scalar internals for this workspace's benchmarks only |
+| `bench-internals` | | Unstable scalar/direct-tier APIs for workspace benchmarks only |
 
 With no features, `field`, `error`, `kernel`, and `active_kernel()` remain
 available and do not require a global allocator.

@@ -8,6 +8,44 @@
 
 use crate::field::tables::{EXP, LOG};
 
+const fn gf_mul_polynomial(mut a: u8, mut b: u8) -> u8 {
+    let mut product = 0u8;
+    let mut bit = 0;
+    while bit < 8 {
+        if b & 1 != 0 {
+            product ^= a;
+        }
+        let high = a & 0x80;
+        a <<= 1;
+        if high != 0 {
+            a ^= 0x1B;
+        }
+        b >>= 1;
+        bit += 1;
+    }
+    product
+}
+
+const fn build_nibble_tables() -> [([u8; 16], [u8; 16]); 256] {
+    let mut tables = [([0u8; 16], [0u8; 16]); 256];
+    let mut coefficient = 0usize;
+    while coefficient < 256 {
+        let mut nibble = 0usize;
+        while nibble < 16 {
+            tables[coefficient].0[nibble] = gf_mul_polynomial(coefficient as u8, nibble as u8);
+            tables[coefficient].1[nibble] =
+                gf_mul_polynomial(coefficient as u8, (nibble as u8) << 4);
+            nibble += 1;
+        }
+        coefficient += 1;
+    }
+    tables
+}
+
+/// Pre-generated fixed-coefficient tables. Keeping this 8 KiB object in
+/// read-only data avoids rebuilding 30 field products at every SIMD call.
+static NIBBLE_TABLES: [([u8; 16], [u8; 16]); 256] = build_nibble_tables();
+
 /// Precompute two 16-entry nibble tables for coefficient `c`.
 ///
 /// For the nibble-split approach used by all SIMD tiers:
@@ -17,23 +55,9 @@ use crate::field::tables::{EXP, LOG};
 /// These are also used by SIMD kernels to initialize their shuffle tables.
 #[inline]
 #[must_use]
+#[allow(dead_code)]
 pub fn make_nibble_tables(c: u8) -> ([u8; 16], [u8; 16]) {
-    let mut lo = [0u8; 16];
-    let mut hi = [0u8; 16];
-    if c == 0 {
-        return (lo, hi);
-    }
-    let log_c = LOG[c as usize] as usize;
-    for j in 1usize..16 {
-        // lo[j] = c * j  (j has no high bit set, so j < 16)
-        lo[j] = EXP[log_c + LOG[j as u8 as usize] as usize];
-        // hi[j] = c * (j << 4)
-        let jhi = (j << 4) as u8;
-        if jhi != 0 {
-            hi[j] = EXP[log_c + LOG[jhi as usize] as usize];
-        }
-    }
-    (lo, hi)
+    NIBBLE_TABLES[c as usize]
 }
 
 /// GF(2⁸) multiply two scalars.
@@ -68,11 +92,9 @@ pub fn axpy(c: u8, x: &[u8], y: &mut [u8]) {
         }
         return;
     }
-    let log_c = LOG[c as usize] as usize;
+    let (lo, hi) = &NIBBLE_TABLES[c as usize];
     for (yi, &xi) in y.iter_mut().zip(x.iter()) {
-        if xi != 0 {
-            *yi ^= EXP[log_c + LOG[xi as usize] as usize];
-        }
+        *yi ^= lo[(xi & 0x0F) as usize] ^ hi[(xi >> 4) as usize];
     }
 }
 
@@ -89,13 +111,9 @@ pub fn scale(c: u8, x: &[u8], y: &mut [u8]) {
         y.copy_from_slice(x);
         return;
     }
-    let log_c = LOG[c as usize] as usize;
+    let (lo, hi) = &NIBBLE_TABLES[c as usize];
     for (yi, &xi) in y.iter_mut().zip(x.iter()) {
-        *yi = if xi != 0 {
-            EXP[log_c + LOG[xi as usize] as usize]
-        } else {
-            0
-        };
+        *yi = lo[(xi & 0x0F) as usize] ^ hi[(xi >> 4) as usize];
     }
 }
 
@@ -110,16 +128,15 @@ pub fn scale_inplace(c: u8, y: &mut [u8]) {
     if c == 1 {
         return;
     }
-    let log_c = LOG[c as usize] as usize;
+    let (lo, hi) = &NIBBLE_TABLES[c as usize];
     for yi in y.iter_mut() {
-        if *yi != 0 {
-            *yi = EXP[log_c + LOG[*yi as usize] as usize];
-        }
+        *yi = lo[(*yi & 0x0F) as usize] ^ hi[(*yi >> 4) as usize];
     }
 }
 
 /// Pure XOR: `y[i] ^= x[i]`  (AXPY with `c = 1`).
 #[inline]
+#[allow(dead_code)]
 pub fn xor_assign(x: &[u8], y: &mut [u8]) {
     debug_assert_eq!(x.len(), y.len());
     for (yi, &xi) in y.iter_mut().zip(x.iter()) {
@@ -199,13 +216,14 @@ mod tests {
 
     #[test]
     fn nibble_tables_correctness() {
-        let c = 0x53u8;
-        let (lo, hi) = make_nibble_tables(c);
-        for x in 0u8..=255 {
-            let xlo = (x & 0x0F) as usize;
-            let xhi = ((x >> 4) & 0x0F) as usize;
-            let result = lo[xlo] ^ hi[xhi];
-            assert_eq!(result, gf_mul(c, x), "c=0x{c:02x}, x=0x{x:02x}");
+        for c in 0u8..=255 {
+            let (lo, hi) = make_nibble_tables(c);
+            for x in 0u8..=255 {
+                let xlo = (x & 0x0F) as usize;
+                let xhi = ((x >> 4) & 0x0F) as usize;
+                let result = lo[xlo] ^ hi[xhi];
+                assert_eq!(result, gf_mul(c, x), "c=0x{c:02x}, x=0x{x:02x}");
+            }
         }
     }
 }

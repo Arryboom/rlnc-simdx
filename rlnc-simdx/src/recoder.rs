@@ -5,6 +5,8 @@
 
 #[cfg(feature = "alloc")]
 extern crate alloc;
+#[cfg(feature = "alloc")]
+use alloc::vec::Vec;
 
 use crate::aligned::AlignedBuffer;
 use crate::encoder::{CodedPacket, SimpleRng};
@@ -54,17 +56,12 @@ impl Recoder {
             rng.fill(&mut recode_coeffs);
         }
 
-        for (i, &rc) in recode_coeffs.iter().enumerate() {
-            if rc == 0 {
-                continue;
-            }
-            kernel::axpy(
-                rc,
-                coded[i].coefficients.as_slice(),
-                out_coeffs.as_mut_slice(),
-            );
-            kernel::axpy(rc, coded[i].payload.as_slice(), out_payload.as_mut_slice());
-        }
+        let mut sources = Vec::with_capacity(coded.len());
+        sources.extend(coded.iter().map(|packet| packet.coefficients.as_slice()));
+        kernel::axpy_multi(&recode_coeffs, &sources, out_coeffs.as_mut_slice());
+        sources.clear();
+        sources.extend(coded.iter().map(|packet| packet.payload.as_slice()));
+        kernel::axpy_multi(&recode_coeffs, &sources, out_payload.as_mut_slice());
 
         Ok(CodedPacket {
             coefficients: out_coeffs,

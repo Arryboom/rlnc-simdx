@@ -1,13 +1,13 @@
 //! RLNC Decoder — in-place pivot-based Gaussian elimination over GF(2⁸).
 //!
-//! Working rows are recycled from a free-list (no heap alloc in the steady-state
-//! receive path). Pivot reorder after back-substitution is done in-place via
-//! swaps (no second matrix allocation).
+//! Coefficients and payloads are stored separately. Incoming coefficients are
+//! reduced first so dependent packets never touch their large payload, while
+//! innovative packet buffers move directly into column-ordered pivot storage.
 
 #[cfg(feature = "alloc")]
 extern crate alloc;
 #[cfg(feature = "alloc")]
-use alloc::{vec, vec::Vec};
+use alloc::vec::Vec;
 
 use crate::aligned::AlignedBuffer;
 use crate::encoder::CodedPacket;
@@ -20,11 +20,10 @@ use crate::kernel;
 pub struct Decoder {
     generation_size: usize,
     symbol_size: usize,
-    /// Augmented rows: `[coefficients (k bytes) | payload (symbol_size bytes)]`.
-    rows: Vec<AlignedBuffer>,
-    /// Recycled working rows for `receive` (same length as matrix rows).
-    free_rows: Vec<AlignedBuffer>,
+    coefficient_rows: Vec<AlignedBuffer>,
+    payload_rows: Vec<AlignedBuffer>,
     pivot_col: Vec<Option<usize>>,
+    elimination_factors: Vec<u8>,
     rank: usize,
     decoded: bool,
 }
@@ -37,16 +36,31 @@ impl Decoder {
             return Err(RlncError::InvalidParameters);
         }
         let k = generation_size;
-        let row_len = k + symbol_size;
-        let rows = (0..k).map(|_| AlignedBuffer::zeroed(row_len)).collect();
-        // Pre-seed one free row so first `receive` need not allocate.
-        let free_rows = vec![AlignedBuffer::zeroed(row_len)];
+        let mut coefficient_rows = Vec::new();
+        let mut payload_rows = Vec::new();
+        let mut pivot_col = Vec::new();
+        let mut elimination_factors = Vec::new();
+        coefficient_rows
+            .try_reserve_exact(k)
+            .map_err(|_| RlncError::InvalidParameters)?;
+        payload_rows
+            .try_reserve_exact(k)
+            .map_err(|_| RlncError::InvalidParameters)?;
+        pivot_col
+            .try_reserve_exact(k)
+            .map_err(|_| RlncError::InvalidParameters)?;
+        elimination_factors
+            .try_reserve_exact(k)
+            .map_err(|_| RlncError::InvalidParameters)?;
+        pivot_col.resize(k, None);
+        elimination_factors.resize(k, 0);
         Ok(Decoder {
             generation_size,
             symbol_size,
-            rows,
-            free_rows,
-            pivot_col: vec![None; k],
+            coefficient_rows,
+            payload_rows,
+            pivot_col,
+            elimination_factors,
             rank: 0,
             decoded: false,
         })
@@ -69,26 +83,13 @@ impl Decoder {
         self.rank == self.generation_size
     }
 
-    fn row_len(&self) -> usize {
-        self.generation_size + self.symbol_size
-    }
-
-    /// Take a working row from the free-list (or allocate if empty).
-    fn take_work_row(&mut self) -> AlignedBuffer {
-        let mut row = self
-            .free_rows
-            .pop()
-            .unwrap_or_else(|| AlignedBuffer::zeroed(self.row_len()));
-        row.as_mut_slice().fill(0);
-        row
-    }
-
     /// Receive a coded packet.
     ///
     /// Returns `true` if the packet was innovative (increased rank).
     ///
-    /// Steady-state hot path: **no heap allocation** (free-list row + in-place
-    /// [`kernel::scale_inplace`] with SIMD).
+    /// Innovative packet allocations are moved directly into pivot storage.
+    /// Dependent packets are rejected after coefficient-only reduction, without
+    /// payload-sized arithmetic or additional allocation.
     pub fn receive(&mut self, pkt: CodedPacket) -> Result<bool, RlncError> {
         let k = self.generation_size;
         let n = self.symbol_size;
@@ -106,44 +107,82 @@ impl Decoder {
             return Ok(false);
         }
 
-        let mut row = self.take_work_row();
-        row.as_mut_slice()[..k].copy_from_slice(pkt.coefficients.as_slice());
-        row.as_mut_slice()[k..].copy_from_slice(pkt.payload.as_slice());
+        let CodedPacket {
+            mut coefficients,
+            mut payload,
+        } = pkt;
 
-        // Forward elimination — pivot rows and `row` are different buffers.
+        // Reduce the small coefficient vector first and record the operations.
+        // A dependent packet can then be rejected without touching its payload.
         for r in 0..self.rank {
             let Some(col) = self.pivot_col[r] else {
                 continue;
             };
-            let coeff = row.as_slice()[col];
+            let coeff = coefficients.as_slice()[col];
+            self.elimination_factors[r] = coeff;
             if coeff == 0 {
                 continue;
             }
-            kernel::axpy(coeff, self.rows[r].as_slice(), row.as_mut_slice());
-        }
-
-        let new_pivot = row.as_slice()[..k].iter().position(|&b| b != 0);
-        let Some(pivot_col) = new_pivot else {
-            // Linearly dependent — recycle row
-            self.free_rows.push(row);
-            return Ok(false);
-        };
-
-        // Normalise pivot to 1 — SIMD in-place scale.
-        let pivot_val = row.as_slice()[pivot_col];
-        if pivot_val != 1 {
-            let inv = EXP[255 - LOG[pivot_val as usize] as usize];
-            if inv != 1 {
-                kernel::scale_inplace(inv, row.as_mut_slice());
+            // SAFETY: stored and incoming packet buffers are distinct owned
+            // allocations and the suffix lengths match.
+            unsafe {
+                kernel::axpy_unchecked(
+                    coeff,
+                    &self.coefficient_rows[r].as_slice()[col..],
+                    &mut coefficients.as_mut_slice()[col..],
+                );
             }
         }
 
-        // Install into matrix; previous placeholder row can be recycled.
-        let old = core::mem::replace(&mut self.rows[self.rank], row);
-        self.free_rows.push(old);
+        let new_pivot = coefficients.as_slice().iter().position(|&b| b != 0);
+        let Some(pivot_col) = new_pivot else {
+            return Ok(false);
+        };
+
+        for r in 0..self.rank {
+            let coeff = self.elimination_factors[r];
+            if coeff != 0 {
+                // SAFETY: stored and incoming payloads are distinct and have
+                // the decoder's validated symbol length.
+                unsafe {
+                    kernel::axpy_unchecked(
+                        coeff,
+                        self.payload_rows[r].as_slice(),
+                        payload.as_mut_slice(),
+                    );
+                }
+            }
+        }
+
+        let pivot_val = coefficients.as_slice()[pivot_col];
+        if pivot_val != 1 {
+            let inv = EXP[255 - LOG[pivot_val as usize] as usize];
+            kernel::scale_inplace(inv, &mut coefficients.as_mut_slice()[pivot_col..]);
+            kernel::scale_inplace(inv, payload.as_mut_slice());
+        }
+
+        // Keep pivot rows ordered. Moving AlignedBuffer handles is cheap and
+        // makes the full-rank pivot order the identity, avoiding a decode-time
+        // O(k^2) selection sort and preserving the echelon invariant.
+        let insert_at = self.pivot_col[..self.rank]
+            .iter()
+            .position(|&col| col.is_some_and(|col| col > pivot_col))
+            .unwrap_or(self.rank);
+
+        self.coefficient_rows.push(coefficients);
+        self.payload_rows.push(payload);
         self.pivot_col[self.rank] = Some(pivot_col);
+        for i in (insert_at..self.rank).rev() {
+            self.coefficient_rows.swap(i, i + 1);
+            self.payload_rows.swap(i, i + 1);
+            self.pivot_col.swap(i, i + 1);
+        }
         self.rank += 1;
         self.decoded = false;
+
+        debug_assert!(self.pivot_col[..self.rank]
+            .windows(2)
+            .all(|pair| pair[0] < pair[1]));
 
         Ok(true)
     }
@@ -159,60 +198,50 @@ impl Decoder {
 
         let k = self.generation_size;
 
+        // There are k distinct, ordered pivots drawn from k columns, so their
+        // only possible full-rank order is 0..k.
+        debug_assert!(self
+            .pivot_col
+            .iter()
+            .enumerate()
+            .all(|(col, &pivot)| pivot == Some(col)));
+
         // Back-substitution — split_at_mut, no allocation
         for r in (0..k).rev() {
             let Some(col) = self.pivot_col[r] else {
                 continue;
             };
+            let (coefficients_above, pivot_coefficients) = self.coefficient_rows.split_at_mut(r);
+            let coefficient_suffix = &pivot_coefficients[0].as_slice()[col..];
+            let (payloads_above, pivot_payloads) = self.payload_rows.split_at_mut(r);
+            let pivot_payload = pivot_payloads[0].as_slice();
             for r2 in 0..r {
-                let coeff = self.rows[r2].as_slice()[col];
+                let coeff = coefficients_above[r2].as_slice()[col];
                 if coeff == 0 {
                     continue;
                 }
-                let (lo, hi) = self.rows.split_at_mut(r);
-                let pivot_slice: &[u8] = hi[0].as_slice();
-                kernel::axpy(coeff, pivot_slice, lo[r2].as_mut_slice());
+                // SAFETY: split_at_mut separates the pivot and destination
+                // rows; corresponding coefficient suffixes and payloads match.
+                unsafe {
+                    kernel::axpy_unchecked(
+                        coeff,
+                        coefficient_suffix,
+                        &mut coefficients_above[r2].as_mut_slice()[col..],
+                    );
+                    kernel::axpy_unchecked(coeff, pivot_payload, payloads_above[r2].as_mut_slice());
+                }
             }
         }
 
-        // In-place permutation so that row i has pivot column i (cycle following).
-        // pivot_col[r] was the pivot of the r-th innovative row before reorder.
-        self.permute_rows_to_identity_pivots();
         self.decoded = true;
 
         Ok(Some(self.extract_symbols()))
     }
 
-    /// In-place reorder: selection-sort rows by pivot column (O(k²), k small).
-    /// After full rank, row `i` has pivot column `i`. No second matrix allocation.
-    fn permute_rows_to_identity_pivots(&mut self) {
-        let k = self.generation_size;
-        for i in 0..k {
-            let mut best = i;
-            let mut best_col = self.pivot_col[i].unwrap_or(usize::MAX);
-            for j in (i + 1)..k {
-                let c = self.pivot_col[j].unwrap_or(usize::MAX);
-                if c < best_col {
-                    best = j;
-                    best_col = c;
-                }
-            }
-            if best != i {
-                self.rows.swap(i, best);
-                self.pivot_col.swap(i, best);
-            }
-        }
-        for i in 0..k {
-            self.pivot_col[i] = Some(i);
-        }
-    }
-
     fn extract_symbols(&self) -> Vec<Vec<u8>> {
-        let k = self.generation_size;
-        let n = self.symbol_size;
-        self.rows
+        self.payload_rows
             .iter()
-            .map(|row| row.as_slice()[k..k + n].to_vec())
+            .map(AlignedBuffer::to_vec)
             .collect()
     }
 }
@@ -298,31 +327,43 @@ mod tests {
         use crate::aligned::ALIGN;
         let k = 4usize;
         let n = 128usize;
-        let dec = Decoder::new(k, n).unwrap();
-        for (i, row) in dec.rows.iter().enumerate() {
+        let source = make_source(k, n);
+        let refs: Vec<&[u8]> = source.iter().map(Vec::as_slice).collect();
+        let encoder = Encoder::new(k, n).unwrap();
+        let mut dec = Decoder::new(k, n).unwrap();
+        assert!(dec
+            .receive(encoder.encode_systematic(&refs, 0).unwrap())
+            .unwrap());
+        for (i, row) in dec.coefficient_rows.iter().enumerate() {
             assert_eq!(
                 row.as_ptr() as usize % ALIGN,
                 0,
-                "decoder row {i} not {ALIGN}-byte aligned"
+                "decoder coefficient row {i} not {ALIGN}-byte aligned"
+            );
+        }
+        for (i, row) in dec.payload_rows.iter().enumerate() {
+            assert_eq!(
+                row.as_ptr() as usize % ALIGN,
+                0,
+                "decoder payload row {i} not {ALIGN}-byte aligned"
             );
         }
     }
 
     #[test]
-    fn free_list_recycles_on_redundant() {
+    fn redundant_packet_does_not_add_storage() {
         let k = 2usize;
         let n = 16usize;
         let source = make_source(k, n);
         let refs: Vec<&[u8]> = source.iter().map(Vec::as_slice).collect();
         let enc = Encoder::new(k, n).unwrap();
         let mut dec = Decoder::new(k, n).unwrap();
-        let free_before = dec.free_rows.len();
         let p = enc.encode_systematic(&refs, 0).unwrap();
         assert!(dec.receive(p).unwrap());
+        let rows_before = dec.payload_rows.len();
         let p2 = enc.encode_systematic(&refs, 0).unwrap();
         assert!(!dec.receive(p2).unwrap());
-        // Redundant receive returns row to free list
-        assert!(dec.free_rows.len() >= free_before);
+        assert_eq!(dec.payload_rows.len(), rows_before);
     }
 
     #[test]

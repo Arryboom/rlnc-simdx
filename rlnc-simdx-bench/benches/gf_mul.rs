@@ -16,7 +16,7 @@ fn bench_gf_mul(c: &mut Criterion) {
     let mut group = c.benchmark_group("gf_mul");
 
     for &size in &sizes {
-        let x = AlignedBuffer::from_slice(&(0u8..).take(size).collect::<Vec<_>>());
+        let x = AlignedBuffer::from_slice(&(0..size).map(|index| index as u8).collect::<Vec<_>>());
         let mut y = AlignedBuffer::zeroed(size);
 
         group.throughput(Throughput::Bytes(size as u64));

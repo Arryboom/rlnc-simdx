@@ -89,6 +89,67 @@ pub(crate) unsafe fn axpy_gfni_sse(c: u8, x: &[u8], y: &mut [u8]) {
     crate::kernel::scalar::axpy(c, &x[i..], &mut y[i..]);
 }
 
+/// Fused multi-source AXPY using one destination load/store per vector.
+///
+/// # Safety
+/// Requires `gfni` and `sse4.2`; validated sources must match and not overlap `y`.
+#[target_feature(enable = "gfni,sse4.2")]
+pub(crate) unsafe fn axpy_multi_gfni_sse(coeffs: &[u8], sources: &[&[u8]], y: &mut [u8]) {
+    debug_assert_eq!(coeffs.len(), sources.len());
+    debug_assert!(sources.iter().all(|source| source.len() == y.len()));
+    let len = y.len();
+    let mut i = 0usize;
+    while i + 16 <= len {
+        let mut acc = _mm_loadu_si128(y.as_ptr().add(i) as *const __m128i);
+        for source_index in 0..coeffs.len() {
+            let coefficient = *coeffs.get_unchecked(source_index);
+            if coefficient == 0 {
+                continue;
+            }
+            let source = *sources.get_unchecked(source_index);
+            let value = _mm_loadu_si128(source.as_ptr().add(i) as *const __m128i);
+            let product = if coefficient == 1 {
+                value
+            } else {
+                _mm_gf2p8mul_epi8(value, _mm_set1_epi8(coefficient as i8))
+            };
+            acc = _mm_xor_si128(acc, product);
+        }
+        _mm_storeu_si128(y.as_mut_ptr().add(i) as *mut __m128i, acc);
+        i += 16;
+    }
+    for source_index in 0..coeffs.len() {
+        crate::kernel::scalar::axpy(
+            *coeffs.get_unchecked(source_index),
+            &sources.get_unchecked(source_index)[i..],
+            &mut y[i..],
+        );
+    }
+}
+
+/// Vectorized GF dot product.
+///
+/// # Safety
+/// Requires `gfni` and `sse4.2`.
+#[target_feature(enable = "gfni,sse4.2")]
+pub(crate) unsafe fn dot_gfni_sse(a: &[u8], b: &[u8]) -> u8 {
+    debug_assert_eq!(a.len(), b.len());
+    let mut acc = _mm_setzero_si128();
+    let mut i = 0usize;
+    while i + 16 <= a.len() {
+        let av = _mm_loadu_si128(a.as_ptr().add(i) as *const __m128i);
+        let bv = _mm_loadu_si128(b.as_ptr().add(i) as *const __m128i);
+        acc = _mm_xor_si128(acc, _mm_gf2p8mul_epi8(av, bv));
+        i += 16;
+    }
+    let mut lanes = [0u8; 16];
+    _mm_storeu_si128(lanes.as_mut_ptr() as *mut __m128i, acc);
+    lanes
+        .iter()
+        .copied()
+        .fold(crate::kernel::scalar::dot(&a[i..], &b[i..]), |x, y| x ^ y)
+}
+
 /// Scale using GFNI `gf2p8mulb` (128-bit), aligned or unaligned.
 ///
 /// # Safety

@@ -1,8 +1,9 @@
 //! Autotuned multithreaded RLNC benchmark support.
 //!
-//! Scalar and SIMD measurements use the same benchmark-local encoder, decoder,
-//! fixtures, allocation strategy, and Rayon parallelism. Only the GF(2^8)
-//! kernel backend changes.
+//! Scalar and SIMD measurements use the same benchmark-local encoder, separated
+//! coefficient/payload decoder, fixtures, allocation strategy, and Rayon
+//! parallelism. Encoding compares a cache-blocked scalar multi-source reference
+//! with the safe adaptive/fused runtime kernel.
 
 use rayon::{prelude::*, ThreadPool, ThreadPoolBuilder};
 use rlnc_simdx::{kernel, AlignedBuffer, Gf8};
@@ -167,7 +168,7 @@ impl Runner {
             || DecodeState::<ScalarKernel>::new(&fixture),
             |state| {
                 assert!(state.decode(&fixture), "full-rank fixture became singular");
-                digest_decoded(&state.rows, fixture.generation_size)
+                digest_decoded(&state.payload_rows)
             },
         )?;
         let simd = self.autotune(
@@ -175,7 +176,7 @@ impl Runner {
             || DecodeState::<SimdKernel>::new(&fixture),
             |state| {
                 assert!(state.decode(&fixture), "full-rank fixture became singular");
-                digest_decoded(&state.rows, fixture.generation_size)
+                digest_decoded(&state.payload_rows)
             },
         )?;
 
@@ -365,6 +366,7 @@ fn best_thread_count(observations: &[(usize, f64)]) -> usize {
 
 trait KernelBackend: Send + Sync + 'static {
     fn axpy(coefficient: u8, source: &[u8], destination: &mut [u8]);
+    fn axpy_multi(coefficients: &[u8], sources: &[&[u8]], destination: &mut [u8]);
     fn scale_inplace(coefficient: u8, destination: &mut [u8]);
 }
 
@@ -374,6 +376,24 @@ impl KernelBackend for ScalarKernel {
     #[inline]
     fn axpy(coefficient: u8, source: &[u8], destination: &mut [u8]) {
         kernel::scalar::axpy(coefficient, source, destination);
+    }
+
+    #[inline]
+    fn axpy_multi(coefficients: &[u8], sources: &[&[u8]], destination: &mut [u8]) {
+        const BLOCK: usize = 4096;
+
+        let mut offset = 0usize;
+        while offset < destination.len() {
+            let end = (offset + BLOCK).min(destination.len());
+            for (&coefficient, source) in coefficients.iter().zip(sources) {
+                Self::axpy(
+                    coefficient,
+                    &source[offset..end],
+                    &mut destination[offset..end],
+                );
+            }
+            offset = end;
+        }
     }
 
     #[inline]
@@ -391,6 +411,11 @@ impl KernelBackend for SimdKernel {
     }
 
     #[inline]
+    fn axpy_multi(coefficients: &[u8], sources: &[&[u8]], destination: &mut [u8]) {
+        kernel::axpy_multi(coefficients, sources, destination);
+    }
+
+    #[inline]
     fn scale_inplace(coefficient: u8, destination: &mut [u8]) {
         kernel::scale_inplace(coefficient, destination);
     }
@@ -401,7 +426,7 @@ struct Fixture {
     symbol_size: usize,
     sources: Vec<AlignedBuffer>,
     coefficients: Vec<Vec<u8>>,
-    coded_rows: Vec<AlignedBuffer>,
+    coded_payloads: Vec<AlignedBuffer>,
 }
 
 impl Fixture {
@@ -414,18 +439,12 @@ impl Fixture {
 
         let sources = make_sources(generation_size, symbol_size);
         let coefficients = make_vandermonde(generation_size);
-        let mut coded_rows = Vec::with_capacity(generation_size);
+        let source_refs: Vec<&[u8]> = sources.iter().map(AlignedBuffer::as_slice).collect();
+        let mut coded_payloads = Vec::with_capacity(generation_size);
         for coefficient_row in &coefficients {
-            let mut row = AlignedBuffer::zeroed(generation_size + symbol_size);
-            row.as_mut_slice()[..generation_size].copy_from_slice(coefficient_row);
-            for (&coefficient, source) in coefficient_row.iter().zip(&sources) {
-                ScalarKernel::axpy(
-                    coefficient,
-                    source.as_slice(),
-                    &mut row.as_mut_slice()[generation_size..],
-                );
-            }
-            coded_rows.push(row);
+            let mut payload = AlignedBuffer::zeroed(symbol_size);
+            ScalarKernel::axpy_multi(coefficient_row, &source_refs, payload.as_mut_slice());
+            coded_payloads.push(payload);
         }
 
         Ok(Self {
@@ -433,7 +452,7 @@ impl Fixture {
             symbol_size,
             sources,
             coefficients,
-            coded_rows,
+            coded_payloads,
         })
     }
 
@@ -444,8 +463,8 @@ impl Fixture {
     fn verify_encode<B: KernelBackend>(&self) -> Result<(), String> {
         let mut state = EncodeState::<B>::new(self);
         state.encode(self);
-        for (actual, expected) in state.payloads.iter().zip(&self.coded_rows) {
-            if actual.as_slice() != &expected.as_slice()[self.generation_size..] {
+        for (actual, expected) in state.payloads.iter().zip(&self.coded_payloads) {
+            if actual.as_slice() != expected.as_slice() {
                 return Err("scalar/SIMD encoder output differs from the fixture".to_owned());
             }
         }
@@ -457,8 +476,8 @@ impl Fixture {
         if !state.decode(self) {
             return Err("full-rank fixture failed to decode".to_owned());
         }
-        for (row, source) in state.rows.iter().zip(&self.sources) {
-            if &row.as_slice()[self.generation_size..] != source.as_slice() {
+        for (payload, source) in state.payload_rows.iter().zip(&self.sources) {
+            if payload.as_slice() != source.as_slice() {
                 return Err("decoded symbols differ from source symbols".to_owned());
             }
         }
@@ -494,83 +513,100 @@ fn make_vandermonde(generation_size: usize) -> Vec<Vec<u8>> {
         .collect()
 }
 
-struct EncodeState<B> {
+struct EncodeState<'a, B> {
     payloads: Vec<AlignedBuffer>,
+    source_refs: Vec<&'a [u8]>,
     backend: PhantomData<B>,
 }
 
-impl<B: KernelBackend> EncodeState<B> {
-    fn new(fixture: &Fixture) -> Self {
+impl<'a, B: KernelBackend> EncodeState<'a, B> {
+    fn new(fixture: &'a Fixture) -> Self {
         Self {
             payloads: (0..fixture.generation_size)
                 .map(|_| AlignedBuffer::zeroed(fixture.symbol_size))
+                .collect(),
+            source_refs: fixture
+                .sources
+                .iter()
+                .map(AlignedBuffer::as_slice)
                 .collect(),
             backend: PhantomData,
         }
     }
 
     fn encode(&mut self, fixture: &Fixture) -> u64 {
-        const BLOCK: usize = 4096;
-
         for (payload, coefficient_row) in self.payloads.iter_mut().zip(&fixture.coefficients) {
             payload.as_mut_slice().fill(0);
-            let mut offset = 0usize;
-            while offset < fixture.symbol_size {
-                let end = (offset + BLOCK).min(fixture.symbol_size);
-                for (&coefficient, source) in coefficient_row.iter().zip(&fixture.sources) {
-                    B::axpy(
-                        coefficient,
-                        &source.as_slice()[offset..end],
-                        &mut payload.as_mut_slice()[offset..end],
-                    );
-                }
-                offset = end;
-            }
+            B::axpy_multi(coefficient_row, &self.source_refs, payload.as_mut_slice());
         }
         digest_payloads(&self.payloads)
     }
 }
 
 struct DecodeState<B> {
-    rows: Vec<AlignedBuffer>,
+    coefficient_rows: Vec<AlignedBuffer>,
+    payload_rows: Vec<AlignedBuffer>,
     backend: PhantomData<B>,
 }
 
 impl<B: KernelBackend> DecodeState<B> {
     fn new(fixture: &Fixture) -> Self {
         Self {
-            rows: (0..fixture.generation_size)
-                .map(|_| AlignedBuffer::zeroed(fixture.generation_size + fixture.symbol_size))
+            coefficient_rows: (0..fixture.generation_size)
+                .map(|_| AlignedBuffer::zeroed(fixture.generation_size))
+                .collect(),
+            payload_rows: (0..fixture.generation_size)
+                .map(|_| AlignedBuffer::zeroed(fixture.symbol_size))
                 .collect(),
             backend: PhantomData,
         }
     }
 
     fn decode(&mut self, fixture: &Fixture) -> bool {
-        for (row, coded) in self.rows.iter_mut().zip(&fixture.coded_rows) {
-            row.as_mut_slice().copy_from_slice(coded.as_slice());
+        for ((coefficient_row, payload_row), (coefficients, payload)) in self
+            .coefficient_rows
+            .iter_mut()
+            .zip(&mut self.payload_rows)
+            .zip(fixture.coefficients.iter().zip(&fixture.coded_payloads))
+        {
+            coefficient_row.as_mut_slice().copy_from_slice(coefficients);
+            payload_row
+                .as_mut_slice()
+                .copy_from_slice(payload.as_slice());
         }
 
         let k = fixture.generation_size;
         let mut rank = 0usize;
         for column in 0..k {
-            let Some(pivot) = (rank..k).find(|&row| self.rows[row].as_slice()[column] != 0) else {
+            let Some(pivot) =
+                (rank..k).find(|&row| self.coefficient_rows[row].as_slice()[column] != 0)
+            else {
                 continue;
             };
-            self.rows.swap(rank, pivot);
+            self.coefficient_rows.swap(rank, pivot);
+            self.payload_rows.swap(rank, pivot);
 
-            let pivot_value = self.rows[rank].as_slice()[column];
+            let pivot_value = self.coefficient_rows[rank].as_slice()[column];
             if pivot_value != 1 {
+                let inverse = Gf8::new(pivot_value).inv().value();
                 B::scale_inplace(
-                    Gf8::new(pivot_value).inv().value(),
-                    self.rows[rank].as_mut_slice(),
+                    inverse,
+                    &mut self.coefficient_rows[rank].as_mut_slice()[column..],
                 );
+                B::scale_inplace(inverse, self.payload_rows[rank].as_mut_slice());
             }
 
             for target in (rank + 1)..k {
-                let coefficient = self.rows[target].as_slice()[column];
+                let coefficient = self.coefficient_rows[target].as_slice()[column];
                 if coefficient != 0 {
-                    axpy_rows::<B>(&mut self.rows, rank, target, coefficient);
+                    axpy_rows::<B>(
+                        &mut self.coefficient_rows,
+                        rank,
+                        target,
+                        coefficient,
+                        column,
+                    );
+                    axpy_rows::<B>(&mut self.payload_rows, rank, target, coefficient, 0);
                 }
             }
             rank += 1;
@@ -585,9 +621,16 @@ impl<B: KernelBackend> DecodeState<B> {
 
         for pivot in (0..k).rev() {
             for target in 0..pivot {
-                let coefficient = self.rows[target].as_slice()[pivot];
+                let coefficient = self.coefficient_rows[target].as_slice()[pivot];
                 if coefficient != 0 {
-                    axpy_rows::<B>(&mut self.rows, pivot, target, coefficient);
+                    axpy_rows::<B>(
+                        &mut self.coefficient_rows,
+                        pivot,
+                        target,
+                        coefficient,
+                        pivot,
+                    );
+                    axpy_rows::<B>(&mut self.payload_rows, pivot, target, coefficient, 0);
                 }
             }
         }
@@ -601,21 +644,22 @@ fn axpy_rows<B: KernelBackend>(
     source_index: usize,
     destination_index: usize,
     coefficient: u8,
+    start: usize,
 ) {
     debug_assert_ne!(source_index, destination_index);
     if source_index < destination_index {
         let (before_destination, destination_and_after) = rows.split_at_mut(destination_index);
         B::axpy(
             coefficient,
-            before_destination[source_index].as_slice(),
-            destination_and_after[0].as_mut_slice(),
+            &before_destination[source_index].as_slice()[start..],
+            &mut destination_and_after[0].as_mut_slice()[start..],
         );
     } else {
         let (before_source, source_and_after) = rows.split_at_mut(source_index);
         B::axpy(
             coefficient,
-            source_and_after[0].as_slice(),
-            before_source[destination_index].as_mut_slice(),
+            &source_and_after[0].as_slice()[start..],
+            &mut before_source[destination_index].as_mut_slice()[start..],
         );
     }
 }
@@ -633,14 +677,17 @@ fn digest_payloads(payloads: &[AlignedBuffer]) -> u64 {
         })
 }
 
-fn digest_decoded(rows: &[AlignedBuffer], generation_size: usize) -> u64 {
-    rows.iter().enumerate().fold(0u64, |digest, (index, row)| {
-        let payload = &row.as_slice()[generation_size..];
-        let sample = u64::from(payload[0])
-            | (u64::from(payload[payload.len() / 2]) << 8)
-            | (u64::from(payload[payload.len() - 1]) << 16);
-        digest.rotate_left(7) ^ sample ^ index as u64
-    })
+fn digest_decoded(payloads: &[AlignedBuffer]) -> u64 {
+    payloads
+        .iter()
+        .enumerate()
+        .fold(0u64, |digest, (index, payload)| {
+            let payload = payload.as_slice();
+            let sample = u64::from(payload[0])
+                | (u64::from(payload[payload.len() / 2]) << 8)
+                | (u64::from(payload[payload.len() - 1]) << 16);
+            digest.rotate_left(7) ^ sample ^ index as u64
+        })
 }
 
 #[cfg(test)]

@@ -33,6 +33,21 @@ pub(crate) unsafe fn axpy_avx512_ssse3(c: u8, x: &[u8], y: &mut [u8]) {
             _mm512_storeu_si512(y.as_mut_ptr().add(i) as *mut _, _mm512_xor_si512(yv, xv));
             i += 64;
         }
+        if i + 32 <= len {
+            let xv = _mm256_loadu_si256(x.as_ptr().add(i) as *const __m256i);
+            let yv = _mm256_loadu_si256(y.as_ptr().add(i) as *const __m256i);
+            _mm256_storeu_si256(
+                y.as_mut_ptr().add(i) as *mut __m256i,
+                _mm256_xor_si256(yv, xv),
+            );
+            i += 32;
+        }
+        if i + 16 <= len {
+            let xv = _mm_loadu_si128(x.as_ptr().add(i) as *const __m128i);
+            let yv = _mm_loadu_si128(y.as_ptr().add(i) as *const __m128i);
+            _mm_storeu_si128(y.as_mut_ptr().add(i) as *mut __m128i, _mm_xor_si128(yv, xv));
+            i += 16;
+        }
         crate::kernel::scalar::xor_assign(&x[i..], &mut y[i..]);
         return;
     }
@@ -70,11 +85,37 @@ pub(crate) unsafe fn axpy_avx512_ssse3(c: u8, x: &[u8], y: &mut [u8]) {
         axpy512_ssse3!(_mm512_loadu_si512, _mm512_storeu_si512);
     }
 
-    // 32-byte AVX2 tail
+    // Reuse the prepared tables for the AVX2 and SSSE3 tails.
     if i + 32 <= len {
-        use super::avx2_ssse3::axpy_avx2_ssse3;
-        axpy_avx2_ssse3(c, &x[i..i + 32], &mut y[i..i + 32]);
+        let lo256 = _mm256_broadcastsi128_si256(lo128);
+        let hi256 = _mm256_broadcastsi128_si256(hi128);
+        let mask256 = _mm256_set1_epi8(0x0Fi8);
+        let xv = _mm256_loadu_si256(x.as_ptr().add(i) as *const __m256i);
+        let yv = _mm256_loadu_si256(y.as_ptr().add(i) as *const __m256i);
+        let xlo = _mm256_and_si256(xv, mask256);
+        let xhi = _mm256_and_si256(_mm256_srli_epi16(xv, 4), mask256);
+        let mul = _mm256_xor_si256(
+            _mm256_shuffle_epi8(lo256, xlo),
+            _mm256_shuffle_epi8(hi256, xhi),
+        );
+        _mm256_storeu_si256(
+            y.as_mut_ptr().add(i) as *mut __m256i,
+            _mm256_xor_si256(yv, mul),
+        );
         i += 32;
+    }
+    if i + 16 <= len {
+        let mask128 = _mm_set1_epi8(0x0Fi8);
+        let xv = _mm_loadu_si128(x.as_ptr().add(i) as *const __m128i);
+        let yv = _mm_loadu_si128(y.as_ptr().add(i) as *const __m128i);
+        let xlo = _mm_and_si128(xv, mask128);
+        let xhi = _mm_and_si128(_mm_srli_epi16(xv, 4), mask128);
+        let mul = _mm_xor_si128(_mm_shuffle_epi8(lo128, xlo), _mm_shuffle_epi8(hi128, xhi));
+        _mm_storeu_si128(
+            y.as_mut_ptr().add(i) as *mut __m128i,
+            _mm_xor_si128(yv, mul),
+        );
+        i += 16;
     }
 
     crate::kernel::scalar::axpy(c, &x[i..], &mut y[i..]);
@@ -138,6 +179,34 @@ pub(crate) unsafe fn scale_avx512_ssse3(c: u8, x: &[u8], y: &mut [u8]) {
         }
     }
 
+    if i + 32 <= len {
+        let lo256 = _mm256_broadcastsi128_si256(lo128);
+        let hi256 = _mm256_broadcastsi128_si256(hi128);
+        let mask256 = _mm256_set1_epi8(0x0Fi8);
+        let xv = _mm256_loadu_si256(x.as_ptr().add(i) as *const __m256i);
+        let xlo = _mm256_and_si256(xv, mask256);
+        let xhi = _mm256_and_si256(_mm256_srli_epi16(xv, 4), mask256);
+        _mm256_storeu_si256(
+            y.as_mut_ptr().add(i) as *mut __m256i,
+            _mm256_xor_si256(
+                _mm256_shuffle_epi8(lo256, xlo),
+                _mm256_shuffle_epi8(hi256, xhi),
+            ),
+        );
+        i += 32;
+    }
+    if i + 16 <= len {
+        let mask128 = _mm_set1_epi8(0x0Fi8);
+        let xv = _mm_loadu_si128(x.as_ptr().add(i) as *const __m128i);
+        let xlo = _mm_and_si128(xv, mask128);
+        let xhi = _mm_and_si128(_mm_srli_epi16(xv, 4), mask128);
+        _mm_storeu_si128(
+            y.as_mut_ptr().add(i) as *mut __m128i,
+            _mm_xor_si128(_mm_shuffle_epi8(lo128, xlo), _mm_shuffle_epi8(hi128, xhi)),
+        );
+        i += 16;
+    }
+
     crate::kernel::scalar::scale(c, &x[i..], &mut y[i..]);
 }
 
@@ -177,12 +246,85 @@ pub(crate) unsafe fn scale_inplace_avx512_ssse3(c: u8, y: &mut [u8]) {
         );
         i += 64;
     }
+    if i + 32 <= len {
+        let lo256 = _mm256_broadcastsi128_si256(lo128);
+        let hi256 = _mm256_broadcastsi128_si256(hi128);
+        let mask256 = _mm256_set1_epi8(0x0Fi8);
+        let yv = _mm256_loadu_si256(y.as_ptr().add(i) as *const __m256i);
+        let ylo = _mm256_and_si256(yv, mask256);
+        let yhi = _mm256_and_si256(_mm256_srli_epi16(yv, 4), mask256);
+        _mm256_storeu_si256(
+            y.as_mut_ptr().add(i) as *mut __m256i,
+            _mm256_xor_si256(
+                _mm256_shuffle_epi8(lo256, ylo),
+                _mm256_shuffle_epi8(hi256, yhi),
+            ),
+        );
+        i += 32;
+    }
+    if i + 16 <= len {
+        let mask128 = _mm_set1_epi8(0x0Fi8);
+        let yv = _mm_loadu_si128(y.as_ptr().add(i) as *const __m128i);
+        let ylo = _mm_and_si128(yv, mask128);
+        let yhi = _mm_and_si128(_mm_srli_epi16(yv, 4), mask128);
+        _mm_storeu_si128(
+            y.as_mut_ptr().add(i) as *mut __m128i,
+            _mm_xor_si128(_mm_shuffle_epi8(lo128, ylo), _mm_shuffle_epi8(hi128, yhi)),
+        );
+        i += 16;
+    }
     crate::kernel::scalar::scale_inplace(c, &mut y[i..]);
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::AlignedBuffer;
+
+    const TAIL_LENGTHS: [usize; 9] = [15, 16, 17, 31, 32, 33, 63, 64, 65];
+
+    fn check_operations(x: &[u8], initial: &[u8], aligned: bool) {
+        for c in [1u8, 0xA3] {
+            let mut expected = initial.to_vec();
+            crate::kernel::scalar::axpy(c, x, &mut expected);
+            if aligned {
+                let mut y = AlignedBuffer::from_slice(initial);
+                unsafe { axpy_avx512_ssse3(c, x, &mut y) };
+                assert_eq!(y.as_slice(), expected, "axpy c={c:#x}");
+            } else {
+                let mut backing = vec![0u8; initial.len() + 1];
+                backing[1..].copy_from_slice(initial);
+                unsafe { axpy_avx512_ssse3(c, x, &mut backing[1..]) };
+                assert_eq!(&backing[1..], expected, "axpy c={c:#x}");
+            }
+        }
+
+        let c = 0xA3;
+        let mut expected = vec![0u8; x.len()];
+        crate::kernel::scalar::scale(c, x, &mut expected);
+        if aligned {
+            let mut y = AlignedBuffer::zeroed(x.len());
+            unsafe { scale_avx512_ssse3(c, x, &mut y) };
+            assert_eq!(y.as_slice(), expected, "scale");
+        } else {
+            let mut backing = vec![0xA5u8; x.len() + 1];
+            unsafe { scale_avx512_ssse3(c, x, &mut backing[1..]) };
+            assert_eq!(&backing[1..], expected, "scale");
+        }
+
+        let mut expected = initial.to_vec();
+        crate::kernel::scalar::scale_inplace(c, &mut expected);
+        if aligned {
+            let mut y = AlignedBuffer::from_slice(initial);
+            unsafe { scale_inplace_avx512_ssse3(c, &mut y) };
+            assert_eq!(y.as_slice(), expected, "scale_inplace");
+        } else {
+            let mut backing = vec![0u8; initial.len() + 1];
+            backing[1..].copy_from_slice(initial);
+            unsafe { scale_inplace_avx512_ssse3(c, &mut backing[1..]) };
+            assert_eq!(&backing[1..], expected, "scale_inplace");
+        }
+    }
 
     #[test]
     fn axpy_matches_scalar() {
@@ -198,5 +340,28 @@ mod tests {
         }
         crate::kernel::scalar::axpy(c, &x, &mut y_scalar);
         assert_eq!(y_simd, y_scalar);
+    }
+
+    #[test]
+    fn vector_tails_match_scalar_at_boundaries() {
+        if !is_x86_feature_detected!("avx512f")
+            || !is_x86_feature_detected!("avx512bw")
+            || !is_x86_feature_detected!("ssse3")
+        {
+            return;
+        }
+        for len in TAIL_LENGTHS {
+            let source: Vec<u8> = (0..len).map(|i| (i as u8).wrapping_mul(29)).collect();
+            let initial: Vec<u8> = (0..len)
+                .map(|i| (i as u8).wrapping_mul(17).wrapping_add(3))
+                .collect();
+            let aligned_source = AlignedBuffer::from_slice(&source);
+            check_operations(&aligned_source, &initial, true);
+
+            let mut unaligned_source = vec![0u8; len + 1];
+            unaligned_source[1..].copy_from_slice(&source);
+            assert_ne!(unaligned_source[1..].as_ptr() as usize & 63, 0);
+            check_operations(&unaligned_source[1..], &initial, false);
+        }
     }
 }

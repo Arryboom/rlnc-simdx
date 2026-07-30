@@ -7,7 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
-## [Unreleased]
+## [1.2.1] — 2026-07-31
+
+### Changed
+
+- Decoder storage now keeps coefficient rows separate from payload rows. Incoming
+  coefficients are reduced before payload arithmetic, dependent packets avoid
+  payload-sized work, and innovative packet buffers move directly into pivot
+  storage.
+- Added adaptive GFNI fused multi-source AXPY and GF(2^8) dot-product kernels
+  for x86 tiers, with vector tails for AVX-512, AVX2, SSE, and SSSE3 paths.
+- Fixed runtime dispatch for `std + wasm simd128` and completed no-std x86
+  GFNI/AVX-512 tier selection. Scalar fixed-coefficient operations use
+  pre-generated nibble tables.
+- Matrix elimination skips aligned completed prefixes, and recoding uses fused
+  multi-source operations for coefficient and payload rows.
+- Updated the multithreaded benchmark's paired scalar/SIMD workload to use
+  adaptive multi-source encoding and separated coefficient/payload decoder rows,
+  matching the optimized production data flow.
+
+### Fixed
+
+- Safe aligned-buffer and matrix size arithmetic now rejects overflow before
+  allocation; `AlignedBuffer::from_slice` no longer creates a slice over
+  uninitialized storage.
+- `Gf8::pow(0, 0)` returns one, and division by zero panics in release builds
+  as well as debug builds.
+- `SimpleRng::new(u64::MAX)` no longer enters the permanent zero state.
+- Added aligned/unaligned SIMD-tail, CPU-validated direct-tier, fused primitive,
+  Recoder, and staged public Decoder benchmark coverage.
 
 ## [1.2.0] — 2026-07-24
 

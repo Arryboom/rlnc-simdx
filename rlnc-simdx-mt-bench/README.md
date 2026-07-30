@@ -9,8 +9,11 @@ The benchmark compares two GF(2^8) kernel backends:
 
 Both backends use the same benchmark-local RLNC encoder/decoder, deterministic
 64-byte-aligned source data, full-rank Vandermonde coefficient matrices,
-allocation strategy, and Rayon generation-level parallelism. Only the kernel
-backend changes.
+allocation strategy, and Rayon generation-level parallelism. The encoder uses
+multi-source AXPY for complete symbols: scalar is the cache-blocked reference,
+while SIMD uses the safe adaptive/fused runtime kernel. The decoder mirrors the
+library's separated coefficient/payload row layout. Only the kernel backend
+changes between each paired measurement.
 
 Independent generations are parallelized because elimination steps inside one
 generation have data dependencies. Scalar and SIMD encode/decode measurements

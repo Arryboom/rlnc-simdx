@@ -8,8 +8,8 @@
 //! - [`scale`] — `y[i] = c * x[i]` (equal lengths; **non-overlapping**; use
 //!   [`scale_inplace`] for in-place)
 //! - [`scale_inplace`] — `y[i] = c * y[i]`
-//! - [`axpy_multi`] — blocked multi-source AXPY for encoding
-//! - [`dot`] — GF(2⁸) dot product (scalar implementation)
+//! - [`axpy_multi`] — adaptive blocked/fused multi-source AXPY for encoding
+//! - [`dot`] — GF(2⁸) dot product (GFNI accelerated when available)
 //! - [`active_kernel_name`] — which SIMD tier is active
 //!
 //! Length and overlap are **asserted in release** on the safe wrappers.
@@ -67,7 +67,9 @@ mod proptest;
     clippy::cast_ptr_alignment,
     clippy::incompatible_msrv,
     clippy::inline_always,
+    clippy::if_not_else,
     clippy::ptr_as_ptr,
+    clippy::too_many_lines,
     clippy::unreadable_literal,
     clippy::verbose_bit_mask,
     clippy::wildcard_imports
@@ -80,18 +82,145 @@ pub(crate) mod arm;
 
 pub(crate) mod wasm;
 
+/// Safe direct-tier handles for workspace benchmarks.
+///
+/// This module exists only with `std + bench-internals`. It is not covered by
+/// the crate's stable API guarantees. Handles are returned only after runtime
+/// CPU-feature detection, while each call retains the public kernels' length
+/// and overlap checks.
+#[cfg(all(feature = "bench-internals", feature = "std"))]
+pub mod bench {
+    use super::ranges_overlap;
+
+    type DirectAxpyFn = unsafe fn(c: u8, x: &[u8], y: &mut [u8]);
+
+    /// A CPU-validated direct AXPY tier used to isolate dispatch overhead and
+    /// compare implementations in benchmarks.
+    #[derive(Clone, Copy)]
+    pub struct DirectAxpyTier {
+        name: &'static str,
+        function: DirectAxpyFn,
+    }
+
+    impl DirectAxpyTier {
+        /// Human-readable ISA tier name.
+        #[must_use]
+        pub fn name(self) -> &'static str {
+            self.name
+        }
+
+        /// Run this tier through the same safety contract as [`super::axpy`].
+        ///
+        /// # Panics
+        /// Panics when lengths differ or the source and destination overlap.
+        pub fn axpy(self, c: u8, x: &[u8], y: &mut [u8]) {
+            assert_eq!(
+                x.len(),
+                y.len(),
+                "rlnc_simdx::kernel::bench::DirectAxpyTier::axpy: length mismatch"
+            );
+            assert!(
+                !ranges_overlap(x.as_ptr(), x.len(), y.as_ptr(), y.len()),
+                "rlnc_simdx::kernel::bench::DirectAxpyTier::axpy: overlapping buffers are not allowed"
+            );
+            // SAFETY: the constructor is private, so handles are created only
+            // after checking their required CPU features. Buffer invariants
+            // were validated above.
+            unsafe { (self.function)(c, x, y) };
+        }
+    }
+
+    /// Return every direct AXPY tier supported by the current CPU.
+    #[must_use]
+    pub fn available_axpy_tiers() -> Vec<DirectAxpyTier> {
+        let mut tiers = Vec::new();
+
+        #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+        {
+            use super::x86;
+
+            if std::is_x86_feature_detected!("gfni")
+                && std::is_x86_feature_detected!("avx512f")
+                && std::is_x86_feature_detected!("avx512bw")
+            {
+                tiers.push(DirectAxpyTier {
+                    name: "gfni+avx512",
+                    function: x86::gfni_avx512::axpy_gfni_avx512 as DirectAxpyFn,
+                });
+            }
+            if std::is_x86_feature_detected!("gfni") && std::is_x86_feature_detected!("avx2") {
+                tiers.push(DirectAxpyTier {
+                    name: "gfni+avx2",
+                    function: x86::gfni_avx2::axpy_gfni_avx2 as DirectAxpyFn,
+                });
+            }
+            if std::is_x86_feature_detected!("gfni") && std::is_x86_feature_detected!("sse4.2") {
+                tiers.push(DirectAxpyTier {
+                    name: "gfni+sse4.2",
+                    function: x86::gfni_sse::axpy_gfni_sse as DirectAxpyFn,
+                });
+            }
+            if std::is_x86_feature_detected!("avx512f")
+                && std::is_x86_feature_detected!("avx512bw")
+                && std::is_x86_feature_detected!("ssse3")
+            {
+                tiers.push(DirectAxpyTier {
+                    name: "avx512+ssse3",
+                    function: x86::avx512_ssse3::axpy_avx512_ssse3 as DirectAxpyFn,
+                });
+            }
+            if std::is_x86_feature_detected!("avx2") && std::is_x86_feature_detected!("ssse3") {
+                tiers.push(DirectAxpyTier {
+                    name: "avx2+ssse3",
+                    function: x86::avx2_ssse3::axpy_avx2_ssse3 as DirectAxpyFn,
+                });
+            }
+            if std::is_x86_feature_detected!("ssse3") {
+                tiers.push(DirectAxpyTier {
+                    name: "ssse3",
+                    function: x86::ssse3::axpy_ssse3 as DirectAxpyFn,
+                });
+            }
+        }
+
+        #[cfg(target_arch = "aarch64")]
+        tiers.push(DirectAxpyTier {
+            name: "neon",
+            function: super::arm::neon::axpy_neon as DirectAxpyFn,
+        });
+
+        #[cfg(all(target_family = "wasm", target_feature = "simd128"))]
+        tiers.push(DirectAxpyTier {
+            name: "wasm-simd128",
+            function: super::wasm::simd128::axpy_wasm as DirectAxpyFn,
+        });
+
+        tiers
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Kernel function-pointer types
 // ---------------------------------------------------------------------------
 
 /// Signature for `axpy`: `y[i] ^= c * x[i]` over GF(2⁸).
+#[cfg(feature = "std")]
 pub(crate) type AxpyFn = unsafe fn(c: u8, x: &[u8], y: &mut [u8]);
 /// Signature for `scale`: `y[i] = c * x[i]` over GF(2⁸).
+#[cfg(feature = "std")]
 pub(crate) type ScaleFn = unsafe fn(c: u8, x: &[u8], y: &mut [u8]);
 /// Signature for in-place scale: `y[i] = c * y[i]`.
+#[cfg(feature = "std")]
 pub(crate) type ScaleInplaceFn = unsafe fn(c: u8, y: &mut [u8]);
+/// Signature for a validated multi-source AXPY implementation.
+#[cfg(feature = "std")]
+pub(crate) type AxpyMultiFn = unsafe fn(coeffs: &[u8], sources: &[&[u8]], y: &mut [u8]);
+/// Signature for a vectorized GF dot product.
+#[cfg(feature = "std")]
+pub(crate) type DotFn = unsafe fn(a: &[u8], b: &[u8]) -> u8;
 
 /// A resolved set of kernel function pointers for the detected CPU tier.
+#[cfg(feature = "std")]
 pub(crate) struct KernelSet {
     /// Best available axpy kernel.
     pub(crate) axpy: AxpyFn,
@@ -99,6 +228,10 @@ pub(crate) struct KernelSet {
     pub(crate) scale: ScaleFn,
     /// Best available in-place scale kernel.
     pub(crate) scale_inplace: ScaleInplaceFn,
+    /// Fused multi-source kernel when the selected ISA provides one.
+    pub(crate) axpy_multi: Option<AxpyMultiFn>,
+    /// Vectorized dot product when the selected ISA provides one.
+    pub(crate) dot: Option<DotFn>,
     /// Human-readable tier name for diagnostics.
     pub(crate) name: &'static str,
 }
@@ -111,11 +244,18 @@ pub(crate) struct KernelSet {
 mod runtime {
     #[cfg(target_arch = "aarch64")]
     use super::arm;
+    #[cfg(all(target_family = "wasm", target_feature = "simd128"))]
+    use super::wasm;
     #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
     use super::x86;
-    #[cfg(not(target_arch = "aarch64"))]
+    #[cfg(not(any(
+        target_arch = "aarch64",
+        all(target_family = "wasm", target_feature = "simd128")
+    )))]
     use super::{scalar_axpy_wrapper, scalar_scale_inplace_wrapper, scalar_scale_wrapper};
     use super::{AxpyFn, KernelSet, ScaleFn, ScaleInplaceFn};
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    use super::{AxpyMultiFn, DotFn};
     use std::sync::OnceLock;
 
     static KERNEL: OnceLock<KernelSet> = OnceLock::new();
@@ -126,6 +266,7 @@ mod runtime {
     }
 
     /// Probe the CPU at runtime and return the highest-tier kernel set.
+    #[allow(clippy::too_many_lines)]
     fn detect() -> KernelSet {
         // ── x86 / x86_64 ────────────────────────────────────────────────────
         #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
@@ -139,6 +280,8 @@ mod runtime {
                     axpy: x86::gfni_avx512::axpy_gfni_avx512 as AxpyFn,
                     scale: x86::gfni_avx512::scale_gfni_avx512 as ScaleFn,
                     scale_inplace: x86::gfni_avx512::scale_inplace_gfni_avx512 as ScaleInplaceFn,
+                    axpy_multi: Some(x86::gfni_avx512::axpy_multi_gfni_avx512 as AxpyMultiFn),
+                    dot: Some(x86::gfni_avx512::dot_gfni_avx512 as DotFn),
                     name: "gfni+avx512 (tier1)",
                 };
             }
@@ -149,6 +292,8 @@ mod runtime {
                     axpy: x86::gfni_avx2::axpy_gfni_avx2 as AxpyFn,
                     scale: x86::gfni_avx2::scale_gfni_avx2 as ScaleFn,
                     scale_inplace: x86::gfni_avx2::scale_inplace_gfni_avx2 as ScaleInplaceFn,
+                    axpy_multi: Some(x86::gfni_avx2::axpy_multi_gfni_avx2 as AxpyMultiFn),
+                    dot: Some(x86::gfni_avx2::dot_gfni_avx2 as DotFn),
                     name: "gfni+avx2 (tier2)",
                 };
             }
@@ -159,6 +304,8 @@ mod runtime {
                     axpy: x86::gfni_sse::axpy_gfni_sse as AxpyFn,
                     scale: x86::gfni_sse::scale_gfni_sse as ScaleFn,
                     scale_inplace: x86::gfni_sse::scale_inplace_gfni_sse as ScaleInplaceFn,
+                    axpy_multi: Some(x86::gfni_sse::axpy_multi_gfni_sse as AxpyMultiFn),
+                    dot: Some(x86::gfni_sse::dot_gfni_sse as DotFn),
                     name: "gfni+sse4.2 (tier3)",
                 };
             }
@@ -172,6 +319,8 @@ mod runtime {
                     axpy: x86::avx512_ssse3::axpy_avx512_ssse3 as AxpyFn,
                     scale: x86::avx512_ssse3::scale_avx512_ssse3 as ScaleFn,
                     scale_inplace: x86::avx512_ssse3::scale_inplace_avx512_ssse3 as ScaleInplaceFn,
+                    axpy_multi: None,
+                    dot: None,
                     name: "avx512+ssse3 (tier4)",
                 };
             }
@@ -182,6 +331,8 @@ mod runtime {
                     axpy: x86::avx2_ssse3::axpy_avx2_ssse3 as AxpyFn,
                     scale: x86::avx2_ssse3::scale_avx2_ssse3 as ScaleFn,
                     scale_inplace: x86::avx2_ssse3::scale_inplace_avx2_ssse3 as ScaleInplaceFn,
+                    axpy_multi: None,
+                    dot: None,
                     name: "avx2+ssse3 (tier5)",
                 };
             }
@@ -192,6 +343,8 @@ mod runtime {
                     axpy: x86::ssse3::axpy_ssse3 as AxpyFn,
                     scale: x86::ssse3::scale_ssse3 as ScaleFn,
                     scale_inplace: x86::ssse3::scale_inplace_ssse3 as ScaleInplaceFn,
+                    axpy_multi: None,
+                    dot: None,
                     name: "ssse3 (tier6)",
                 };
             }
@@ -205,21 +358,40 @@ mod runtime {
                 axpy: arm::neon::axpy_neon as AxpyFn,
                 scale: arm::neon::scale_neon as ScaleFn,
                 scale_inplace: arm::neon::scale_inplace_neon as ScaleInplaceFn,
+                axpy_multi: None,
+                dot: None,
                 name: "neon (tier7)",
             };
         }
 
         // ── WASM SIMD128 ─────────────────────────────────────────────────────
-        // Runtime feature detection is unavailable on wasm32; compile-time path.
+        // Runtime feature detection is unavailable on wasm32. SIMD128 is a
+        // compile-time feature even when the crate is built with `std`.
+        #[cfg(all(target_family = "wasm", target_feature = "simd128"))]
+        {
+            return KernelSet {
+                axpy: wasm::simd128::axpy_wasm as AxpyFn,
+                scale: wasm::simd128::scale_wasm as ScaleFn,
+                scale_inplace: wasm::simd128::scale_inplace_wasm as ScaleInplaceFn,
+                axpy_multi: None,
+                dot: None,
+                name: "wasm-simd128 (tier8)",
+            };
+        }
 
         // ── Scalar fallback ──────────────────────────────────────────────────
         // AArch64 returned the mandatory NEON kernel above, so compiling this
         // fallback there would only create unreachable-code/dead-import noise.
-        #[cfg(not(target_arch = "aarch64"))]
+        #[cfg(not(any(
+            target_arch = "aarch64",
+            all(target_family = "wasm", target_feature = "simd128")
+        )))]
         KernelSet {
             axpy: scalar_axpy_wrapper as AxpyFn,
             scale: scalar_scale_wrapper as ScaleFn,
             scale_inplace: scalar_scale_inplace_wrapper as ScaleInplaceFn,
+            axpy_multi: None,
+            dot: None,
             name: "scalar (tier9)",
         }
     }
@@ -229,17 +401,35 @@ mod runtime {
 // Thin wrappers so scalar fns have the right unsafe fn signature
 // ---------------------------------------------------------------------------
 
-#[cfg(all(feature = "std", not(target_arch = "aarch64")))]
+#[cfg(all(
+    feature = "std",
+    not(any(
+        target_arch = "aarch64",
+        all(target_family = "wasm", target_feature = "simd128")
+    ))
+))]
 unsafe fn scalar_axpy_wrapper(c: u8, x: &[u8], y: &mut [u8]) {
     scalar::axpy(c, x, y);
 }
 
-#[cfg(all(feature = "std", not(target_arch = "aarch64")))]
+#[cfg(all(
+    feature = "std",
+    not(any(
+        target_arch = "aarch64",
+        all(target_family = "wasm", target_feature = "simd128")
+    ))
+))]
 unsafe fn scalar_scale_wrapper(c: u8, x: &[u8], y: &mut [u8]) {
     scalar::scale(c, x, y);
 }
 
-#[cfg(all(feature = "std", not(target_arch = "aarch64")))]
+#[cfg(all(
+    feature = "std",
+    not(any(
+        target_arch = "aarch64",
+        all(target_family = "wasm", target_feature = "simd128")
+    ))
+))]
 unsafe fn scalar_scale_inplace_wrapper(c: u8, y: &mut [u8]) {
     scalar::scale_inplace(c, y);
 }
@@ -274,12 +464,18 @@ pub fn axpy(c: u8, x: &[u8], y: &mut [u8]) {
         !ranges_overlap(x.as_ptr(), x.len(), y.as_ptr(), y.len()),
         "rlnc_simdx::kernel::axpy: overlapping buffers are not allowed"
     );
+    // SAFETY: length and non-overlap were checked above.
+    unsafe { axpy_unchecked(c, x, y) }
+}
+
+/// Dispatch AXPY after the caller has established equal lengths and disjoint
+/// source/destination storage. This is crate-private so public callers cannot
+/// bypass the safe wrapper's validation.
+#[inline]
+pub(crate) unsafe fn axpy_unchecked(c: u8, x: &[u8], y: &mut [u8]) {
+    debug_assert_eq!(x.len(), y.len());
     #[cfg(feature = "std")]
-    // SAFETY: runtime::get() only returns a kernel verified for this CPU.
-    // Length + non-overlap enforced above.
-    unsafe {
-        (runtime::get().axpy)(c, x, y);
-    }
+    (runtime::get().axpy)(c, x, y);
 
     #[cfg(not(feature = "std"))]
     axpy_static(c, x, y)
@@ -371,7 +567,26 @@ pub fn axpy_multi(coeffs: &[u8], sources: &[&[u8]], y: &mut [u8]) {
     }
 
     #[cfg(feature = "std")]
-    let axpy_kernel = runtime::get().axpy;
+    let axpy_kernel = {
+        let kernels = runtime::get();
+        // Full fusion trades repeated destination traffic for a dynamic
+        // multi-stream inner loop. Measurements on tier1 show the latter wins
+        // only once the symbol has left the small-cache regime.
+        if y.len() >= 32 * 1024 && coeffs.len() >= 8 {
+            if let Some(fused) = kernels.axpy_multi {
+                // SAFETY: all lengths and destination overlaps were validated
+                // above, and runtime dispatch verified the CPU feature set.
+                unsafe { fused(coeffs, sources, y) };
+                return;
+            }
+        }
+        kernels.axpy
+    };
+
+    #[cfg(not(feature = "std"))]
+    if y.len() >= 32 * 1024 && coeffs.len() >= 8 && axpy_multi_static(coeffs, sources, y) {
+        return;
+    }
 
     // Cache-blocked loop interchange: keep a destination chunk hot while
     // streaming all sources (better for large symbols / many sources).
@@ -416,7 +631,7 @@ fn ranges_overlap(a: *const u8, a_len: usize, b: *const u8, b_len: usize) -> boo
     a0 < b1 && b0 < a1
 }
 
-/// `sum(a[i] * b[i])`  in GF(2⁸).  Always scalar.
+/// `sum(a[i] * b[i])` in GF(2⁸).
 ///
 /// # Panics
 /// Panics if `a.len() != b.len()`.
@@ -424,6 +639,15 @@ fn ranges_overlap(a: *const u8, a_len: usize, b: *const u8, b_len: usize) -> boo
 #[must_use]
 pub fn dot(a: &[u8], b: &[u8]) -> u8 {
     assert_eq!(a.len(), b.len(), "rlnc_simdx::kernel::dot: length mismatch");
+    #[cfg(feature = "std")]
+    if let Some(dot_kernel) = runtime::get().dot {
+        // SAFETY: runtime dispatch verified the feature set and lengths match.
+        return unsafe { dot_kernel(a, b) };
+    }
+    #[cfg(not(feature = "std"))]
+    if let Some(result) = dot_static(a, b) {
+        return result;
+    }
     scalar::dot(a, b)
 }
 
@@ -474,9 +698,23 @@ fn axpy_static(c: u8, x: &[u8], y: &mut [u8]) {
         ))]
         return unsafe { x86::gfni_avx2::axpy_gfni_avx2(c, x, y) };
         #[cfg(all(
-            target_feature = "avx2",
+            target_feature = "gfni",
+            target_feature = "sse4.2",
+            not(target_feature = "avx2")
+        ))]
+        return unsafe { x86::gfni_sse::axpy_gfni_sse(c, x, y) };
+        #[cfg(all(
+            target_feature = "avx512f",
+            target_feature = "avx512bw",
             target_feature = "ssse3",
             not(target_feature = "gfni")
+        ))]
+        return unsafe { x86::avx512_ssse3::axpy_avx512_ssse3(c, x, y) };
+        #[cfg(all(
+            target_feature = "avx2",
+            target_feature = "ssse3",
+            not(target_feature = "gfni"),
+            not(all(target_feature = "avx512f", target_feature = "avx512bw"))
         ))]
         return unsafe { x86::avx2_ssse3::axpy_avx2_ssse3(c, x, y) };
         #[cfg(all(target_feature = "ssse3", not(target_feature = "avx2")))]
@@ -484,6 +722,10 @@ fn axpy_static(c: u8, x: &[u8], y: &mut [u8]) {
     }
 
     // Universal scalar fallback
+    #[cfg(not(any(
+        target_arch = "aarch64",
+        all(target_family = "wasm", target_feature = "simd128")
+    )))]
     scalar::axpy(c, x, y)
 }
 
@@ -512,15 +754,33 @@ fn scale_static(c: u8, x: &[u8], y: &mut [u8]) {
         ))]
         return unsafe { x86::gfni_avx2::scale_gfni_avx2(c, x, y) };
         #[cfg(all(
-            target_feature = "avx2",
+            target_feature = "gfni",
+            target_feature = "sse4.2",
+            not(target_feature = "avx2")
+        ))]
+        return unsafe { x86::gfni_sse::scale_gfni_sse(c, x, y) };
+        #[cfg(all(
+            target_feature = "avx512f",
+            target_feature = "avx512bw",
             target_feature = "ssse3",
             not(target_feature = "gfni")
+        ))]
+        return unsafe { x86::avx512_ssse3::scale_avx512_ssse3(c, x, y) };
+        #[cfg(all(
+            target_feature = "avx2",
+            target_feature = "ssse3",
+            not(target_feature = "gfni"),
+            not(all(target_feature = "avx512f", target_feature = "avx512bw"))
         ))]
         return unsafe { x86::avx2_ssse3::scale_avx2_ssse3(c, x, y) };
         #[cfg(all(target_feature = "ssse3", not(target_feature = "avx2")))]
         return unsafe { x86::ssse3::scale_ssse3(c, x, y) };
     }
 
+    #[cfg(not(any(
+        target_arch = "aarch64",
+        all(target_family = "wasm", target_feature = "simd128")
+    )))]
     scalar::scale(c, x, y)
 }
 
@@ -549,15 +809,33 @@ fn scale_inplace_static(c: u8, y: &mut [u8]) {
         ))]
         return unsafe { x86::gfni_avx2::scale_inplace_gfni_avx2(c, y) };
         #[cfg(all(
-            target_feature = "avx2",
+            target_feature = "gfni",
+            target_feature = "sse4.2",
+            not(target_feature = "avx2")
+        ))]
+        return unsafe { x86::gfni_sse::scale_inplace_gfni_sse(c, y) };
+        #[cfg(all(
+            target_feature = "avx512f",
+            target_feature = "avx512bw",
             target_feature = "ssse3",
             not(target_feature = "gfni")
+        ))]
+        return unsafe { x86::avx512_ssse3::scale_inplace_avx512_ssse3(c, y) };
+        #[cfg(all(
+            target_feature = "avx2",
+            target_feature = "ssse3",
+            not(target_feature = "gfni"),
+            not(all(target_feature = "avx512f", target_feature = "avx512bw"))
         ))]
         return unsafe { x86::avx2_ssse3::scale_inplace_avx2_ssse3(c, y) };
         #[cfg(all(target_feature = "ssse3", not(target_feature = "avx2")))]
         return unsafe { x86::ssse3::scale_inplace_ssse3(c, y) };
     }
 
+    #[cfg(not(any(
+        target_arch = "aarch64",
+        all(target_family = "wasm", target_feature = "simd128")
+    )))]
     scalar::scale_inplace(c, y)
 }
 
@@ -567,23 +845,110 @@ fn active_kernel_name_static() -> &'static str {
     return "wasm-simd128 (tier8)";
     #[cfg(target_arch = "aarch64")]
     return "neon (tier7)";
-    #[cfg(all(target_feature = "gfni", target_feature = "avx512f"))]
+    #[cfg(all(
+        target_feature = "gfni",
+        target_feature = "avx512f",
+        target_feature = "avx512bw"
+    ))]
     return "gfni+avx512 (tier1)";
     #[cfg(all(
         target_feature = "gfni",
         target_feature = "avx2",
-        not(target_feature = "avx512f")
+        not(all(target_feature = "avx512f", target_feature = "avx512bw"))
     ))]
     return "gfni+avx2 (tier2)";
     #[cfg(all(
-        target_feature = "avx2",
+        target_feature = "gfni",
+        target_feature = "sse4.2",
+        not(target_feature = "avx2")
+    ))]
+    return "gfni+sse4.2 (tier3)";
+    #[cfg(all(
+        target_feature = "avx512f",
+        target_feature = "avx512bw",
         target_feature = "ssse3",
         not(target_feature = "gfni")
+    ))]
+    return "avx512+ssse3 (tier4)";
+    #[cfg(all(
+        target_feature = "avx2",
+        target_feature = "ssse3",
+        not(target_feature = "gfni"),
+        not(all(target_feature = "avx512f", target_feature = "avx512bw"))
     ))]
     return "avx2+ssse3 (tier5)";
     #[cfg(all(target_feature = "ssse3", not(target_feature = "avx2")))]
     return "ssse3 (tier6)";
-    "scalar (tier9)"
+    #[cfg(not(any(
+        target_arch = "aarch64",
+        all(target_family = "wasm", target_feature = "simd128")
+    )))]
+    return "scalar (tier9)";
+}
+
+#[cfg(not(feature = "std"))]
+#[inline]
+fn axpy_multi_static(coeffs: &[u8], sources: &[&[u8]], y: &mut [u8]) -> bool {
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    {
+        #[cfg(all(
+            target_feature = "gfni",
+            target_feature = "avx512f",
+            target_feature = "avx512bw"
+        ))]
+        unsafe {
+            x86::gfni_avx512::axpy_multi_gfni_avx512(coeffs, sources, y);
+            return true;
+        }
+        #[cfg(all(
+            target_feature = "gfni",
+            target_feature = "avx2",
+            not(all(target_feature = "avx512f", target_feature = "avx512bw"))
+        ))]
+        unsafe {
+            x86::gfni_avx2::axpy_multi_gfni_avx2(coeffs, sources, y);
+            return true;
+        }
+        #[cfg(all(
+            target_feature = "gfni",
+            target_feature = "sse4.2",
+            not(target_feature = "avx2")
+        ))]
+        unsafe {
+            x86::gfni_sse::axpy_multi_gfni_sse(coeffs, sources, y);
+            return true;
+        }
+    }
+    let _ = (coeffs, sources, y);
+    false
+}
+
+#[cfg(not(feature = "std"))]
+#[inline]
+fn dot_static(a: &[u8], b: &[u8]) -> Option<u8> {
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    {
+        #[cfg(all(
+            target_feature = "gfni",
+            target_feature = "avx512f",
+            target_feature = "avx512bw"
+        ))]
+        return Some(unsafe { x86::gfni_avx512::dot_gfni_avx512(a, b) });
+        #[cfg(all(
+            target_feature = "gfni",
+            target_feature = "avx2",
+            not(all(target_feature = "avx512f", target_feature = "avx512bw"))
+        ))]
+        return Some(unsafe { x86::gfni_avx2::dot_gfni_avx2(a, b) });
+        #[cfg(all(
+            target_feature = "gfni",
+            target_feature = "sse4.2",
+            not(target_feature = "avx2")
+        ))]
+        return Some(unsafe { x86::gfni_sse::dot_gfni_sse(a, b) });
+    }
+    let _ = (a, b);
+    None
 }
 
 // ---------------------------------------------------------------------------
@@ -613,6 +978,19 @@ mod tests {
         scale(c, &x, &mut y_scale);
         axpy(c, &x, &mut y_axpy);
         assert_eq!(y_scale, y_axpy);
+    }
+
+    #[test]
+    fn dispatched_dot_matches_scalar_across_vector_tails() {
+        for len in [0usize, 1, 15, 16, 17, 31, 32, 33, 63, 64, 65, 1025] {
+            let a: Vec<u8> = (0..len)
+                .map(|index| (index as u8).wrapping_mul(17).wrapping_add(1))
+                .collect();
+            let b: Vec<u8> = (0..len)
+                .map(|index| (index as u8).wrapping_mul(29).wrapping_add(3))
+                .collect();
+            assert_eq!(dot(&a, &b), scalar::dot(&a, &b), "len={len}");
+        }
     }
 
     #[test]

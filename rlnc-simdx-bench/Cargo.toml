@@ -30,6 +30,10 @@ harness = false
 name    = "decode"
 harness = false
 
+[[bench]]
+name    = "pipeline"
+harness = false
+
 [dependencies]
 rlnc-simdx = { path = "../rlnc-simdx", features = ["std", "alloc", "bench-internals"] }
 

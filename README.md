@@ -2,7 +2,7 @@
 
 **SIMD-accelerated Random Linear Network Coding over GF(2⁸)**
 
-Author: **[arryboom](https://github.com/arryboom)** · MSRV 1.89 · License [Apache-2.0](LICENSE) · v1.2.0
+Author: **[arryboom](https://github.com/arryboom)** · MSRV 1.89 · License [Apache-2.0](LICENSE) · v1.2.1
 
 Crate package: **`rlnc-simdx`** · Rust import: **`rlnc_simdx`**
 
@@ -143,7 +143,8 @@ CPUs with **GFNI** (Ice Lake+, Zen 4+) usually report `gfni+avx2` or
 ### Run benchmarks
 
 The focused multithreaded benchmark compares scalar and runtime-dispatched SIMD
-encode/decode throughput using the same RLNC pipeline and Rayon parallelism:
+encode/decode throughput using the same RLNC pipeline, separated decoder row
+layout, adaptive multi-source encoding, and Rayon parallelism:
 
 ```bash
 cargo run --release -p rlnc-simdx-mt-bench
@@ -186,8 +187,9 @@ cargo bench -p rlnc-simdx-bench --bench decode
 ```
 
 The workspace benchmark package enables the explicitly unstable
-`bench-internals` feature to compare scalar internals with the supported safe
-kernel API. Applications should not enable that feature.
+`bench-internals` feature to compare scalar and CPU-validated direct-tier
+internals with the supported safe kernel API. Applications should not enable
+that feature.
 
 ---
 
@@ -221,7 +223,7 @@ cargo check -p rlnc-simdx --no-default-features --features alloc   # no_std + al
 |---------|---------|---------|
 | `alloc` | ✓ | Heap APIs: aligned buffers, matrix, encoder, decoder, and recoder |
 | `std` | ✓ | Runtime CPU dispatch; implies `alloc` |
-| `bench-internals` | | Unstable scalar internals for this workspace's benchmarks only |
+| `bench-internals` | | Unstable scalar/direct-tier APIs for workspace benchmarks only |
 
 With no features, `field`, `error`, `kernel`, and `active_kernel()` remain
 available and do not require a global allocator.

@@ -70,7 +70,12 @@ pub struct SimpleRng(u64);
 impl SimpleRng {
     /// Create a new RNG from `seed`.
     pub fn new(seed: u64) -> Self {
-        SimpleRng(seed.wrapping_add(1))
+        let state = seed.wrapping_add(1);
+        SimpleRng(if state == 0 {
+            0x9E37_79B9_7F4A_7C15
+        } else {
+            state
+        })
     }
     /// Next pseudorandom byte.
     pub fn next_u8(&mut self) -> u8 {
@@ -121,8 +126,8 @@ impl Encoder {
 
     /// Encode one random-linear coded packet.
     ///
-    /// Uses cache-blocked multi-source AXPY ([`kernel::axpy_multi`]) for
-    /// better DRAM behaviour when `k` is moderate and `symbol_size` is large.
+    /// Uses adaptive multi-source AXPY ([`kernel::axpy_multi`]): cache-blocked
+    /// kernels for small symbols and fused GFNI kernels for large symbols.
     ///
     /// `source` must contain exactly `generation_size` slices, each of
     /// length `symbol_size`.  `rng` provides the random coefficients.
@@ -228,6 +233,15 @@ mod tests {
                 .enumerate()
                 .all(|(j, &c)| if j == i { c == 1 } else { c == 0 }));
         }
+    }
+
+    #[test]
+    fn max_seed_does_not_enter_zero_state() {
+        let mut rng = SimpleRng::new(u64::MAX);
+        assert_ne!(rng.next_u8(), 0);
+        let mut bytes = [0u8; 16];
+        rng.fill(&mut bytes);
+        assert!(bytes.iter().any(|&byte| byte != 0));
     }
 
     #[test]

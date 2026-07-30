@@ -47,7 +47,7 @@
 //! |-------------------|---------|----------------------------------------------|
 //! | `alloc`           | on      | Enables heap-backed RLNC APIs and `GfMatrix` |
 //! | `std`             | on      | Enables runtime CPU dispatch; implies alloc  |
-//! | `bench-internals` | off     | Unstable scalar internals for benchmarks     |
+//! | `bench-internals` | off     | Unstable scalar/direct-tier benchmark APIs   |
 //!
 //! ## Quick Start
 //!

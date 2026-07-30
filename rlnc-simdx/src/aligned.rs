@@ -4,7 +4,8 @@
 //! `AlignedBuffer` is used internally (and optionally by callers) so encoder,
 //! decoder, and matrix rows hit aligned SIMD paths by default.
 //!
-//! **Public constructors:** [`zeroed`], [`from_slice`].
+//! **Public constructors:** [`AlignedBuffer::zeroed`],
+//! [`AlignedBuffer::from_slice`].
 //! **Internal only:** `new_uninit` is `pub(crate)` so external code cannot
 //! obtain a slice over uninitialized memory.
 //!
@@ -98,7 +99,12 @@ impl AlignedBuffer {
     pub fn from_slice(src: &[u8]) -> Self {
         let mut buf = Self::new_uninit(src.len());
         if !src.is_empty() {
-            buf.as_mut_slice().copy_from_slice(src);
+            // SAFETY: both regions are valid for `src.len()` bytes and the new
+            // allocation cannot overlap the borrowed source. Raw copy avoids
+            // forming a byte slice over uninitialized storage before writing.
+            unsafe {
+                core::ptr::copy_nonoverlapping(src.as_ptr(), buf.as_mut_ptr(), src.len());
+            }
         }
         buf
     }
@@ -172,7 +178,9 @@ impl AlignedBuffer {
     #[inline]
     fn padded_cap(len: usize) -> usize {
         // Round up to ALIGN so the allocation itself is a multiple of ALIGN
-        (len + ALIGN - 1) & !(ALIGN - 1)
+        len.checked_add(ALIGN - 1)
+            .map(|value| value & !(ALIGN - 1))
+            .expect("AlignedBuffer capacity overflow")
     }
 
     #[inline]
@@ -265,6 +273,12 @@ mod tests {
         let buf = AlignedBuffer::zeroed(0);
         assert!(buf.is_empty());
         assert_eq!(buf.len(), 0);
+    }
+
+    #[test]
+    #[should_panic(expected = "AlignedBuffer capacity overflow")]
+    fn oversized_length_panics_before_allocation() {
+        let _ = AlignedBuffer::zeroed(usize::MAX);
     }
 
     #[test]

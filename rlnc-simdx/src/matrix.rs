@@ -36,7 +36,9 @@ impl GfMatrix {
     /// Compute the padded row stride for `cols` data columns.
     #[inline]
     pub fn padded_stride(cols: usize) -> usize {
-        (cols + ALIGN - 1) & !(ALIGN - 1)
+        cols.checked_add(ALIGN - 1)
+            .map(|value| value & !(ALIGN - 1))
+            .expect("GfMatrix stride overflow")
     }
 
     /// Allocate a zero matrix of size `rows × cols` with aligned rows.
@@ -46,7 +48,7 @@ impl GfMatrix {
             rows,
             cols,
             stride,
-            data: AlignedBuffer::zeroed(rows * stride),
+            data: AlignedBuffer::zeroed(rows.checked_mul(stride).expect("GfMatrix size overflow")),
         }
     }
 
@@ -93,6 +95,10 @@ impl GfMatrix {
     /// # Panics
     /// Panics if `dst == src` (would create overlapping views).
     pub fn row_axpy(&mut self, dst: usize, c: u8, src: usize) {
+        self.row_axpy_from(dst, c, src, 0);
+    }
+
+    fn row_axpy_from(&mut self, dst: usize, c: u8, src: usize, start: usize) {
         assert_ne!(dst, src, "GfMatrix::row_axpy: dst and src must differ");
         let stride = self.stride;
         let cols = self.cols;
@@ -101,21 +107,26 @@ impl GfMatrix {
         // Split borrow: get disjoint mutable/immutable references
         let (src_slice, dst_slice) = if dst > src {
             let (lo, hi) = self.data.as_mut_slice().split_at_mut(dst_off);
-            (&lo[src_off..src_off + cols], &mut hi[..cols])
+            (&lo[src_off + start..src_off + cols], &mut hi[start..cols])
         } else {
             let (lo, hi) = self.data.as_mut_slice().split_at_mut(src_off);
-            (&hi[..cols], &mut lo[dst_off..dst_off + cols])
+            (&hi[start..cols], &mut lo[dst_off + start..dst_off + cols])
         };
 
-        kernel::axpy(c, src_slice, dst_slice);
+        // SAFETY: split_at_mut created disjoint rows of equal length.
+        unsafe { kernel::axpy_unchecked(c, src_slice, dst_slice) };
     }
 
     /// Scale row `r` by scalar `c` using SIMD [`kernel::scale_inplace`].
     pub fn row_scale(&mut self, r: usize, c: u8) {
+        self.row_scale_from(r, c, 0);
+    }
+
+    fn row_scale_from(&mut self, r: usize, c: u8, start: usize) {
         let stride = self.stride;
         let cols = self.cols;
         let off = r * stride;
-        kernel::scale_inplace(c, &mut self.data.as_mut_slice()[off..off + cols]);
+        kernel::scale_inplace(c, &mut self.data.as_mut_slice()[off + start..off + cols]);
     }
 
     /// Swap rows `a` and `b`.
@@ -151,9 +162,10 @@ impl GfMatrix {
             }
 
             let pivot_val = self.data.as_slice()[pivot_row * self.stride + col];
+            let operation_start = col & !(ALIGN - 1);
             if pivot_val != 1 {
                 let inv = EXP[255 - LOG[pivot_val as usize] as usize];
-                self.row_scale(pivot_row, inv);
+                self.row_scale_from(pivot_row, inv, operation_start);
             }
 
             for r2 in 0..rows {
@@ -162,7 +174,7 @@ impl GfMatrix {
                 }
                 let coeff = self.data.as_slice()[r2 * self.stride + col];
                 if coeff != 0 {
-                    self.row_axpy(r2, coeff, pivot_row);
+                    self.row_axpy_from(r2, coeff, pivot_row, operation_start);
                 }
             }
 
@@ -199,6 +211,12 @@ mod tests {
             let ptr = m.row(r).as_ptr() as usize;
             assert_eq!(ptr % ALIGN, 0, "row {r} not {ALIGN}-byte aligned");
         }
+    }
+
+    #[test]
+    #[should_panic(expected = "GfMatrix stride overflow")]
+    fn oversized_columns_panic_before_allocation() {
+        let _ = GfMatrix::zeros(1, usize::MAX);
     }
 
     #[test]
