@@ -91,7 +91,7 @@ println!("kernel: {}", rlnc_simdx::active_kernel());
 | **SIMD** | Picked automatically at runtime with `std`; compile-time selection without `std` |
 | **Safety** | Public kernels check length and non-overlap in release builds and panic on misuse |
 | **Dependencies** | None |
-| **Tests** | 91 unit tests + 3 doctests |
+| **Tests** | 100 unit tests + 3 doctests |
 
 SVE is experimental and intentionally not part of production dispatch. AArch64
 uses the production NEON kernel. The SVE module remains crate-private until a
@@ -236,18 +236,18 @@ Maintainers create and push a signed semantic-version tag after updating the
 workspace version, lockfile, changelog, and synchronized READMEs:
 
 ```bash
-git tag -s v1.2.0
-git push origin v1.2.0
+git tag -s v1.2.1
+git push origin v1.2.1
 ```
 
 The tag push runs the release workflow. A manual workflow dispatch may rerun an
 existing tag idempotently; it does not create the tag. The workflow requires the
 tag version to match the inherited Cargo workspace version and publishes:
 
-- `rlnc-simdx-1.2.0.crate`
-- `rlnc-simdx-bench-1.2.0-x86_64-unknown-linux-gnu.tar.gz`
-- `rlnc-simdx-bench-1.2.0-x86_64-pc-windows-msvc.zip`
-- `rlnc-simdx-bench-1.2.0-x86_64-apple-darwin.tar.gz`
+- `rlnc-simdx-1.2.1.crate`
+- `rlnc-simdx-bench-1.2.1-x86_64-unknown-linux-gnu.tar.gz`
+- `rlnc-simdx-bench-1.2.1-x86_64-pc-windows-msvc.zip`
+- `rlnc-simdx-bench-1.2.1-x86_64-apple-darwin.tar.gz`
 - `SHA256SUMS`
 
 Each native archive contains `bench_standalone` and `rlnc-simdx-mt-bench` (with
