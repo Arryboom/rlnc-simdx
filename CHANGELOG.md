@@ -7,8 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [Unreleased]
 
-## [1.2.1] — 2026-07-31
+## [1.3.1] — 2026-07-31
 
 ### Changed
 
@@ -212,8 +213,8 @@ features. The originally stated MSRV 1.79 was corrected to 1.89 in 1.1.0.
 - Historical `build.rs` safe `__cpuid_count` usage
 - Early decoder/recoder borrow and import cleanups
 
-[Unreleased]: https://github.com/arryboom/rlnc-simdx/compare/v1.2.1...HEAD
-[1.2.1]: https://github.com/arryboom/rlnc-simdx/compare/v1.2.0...v1.2.1
+[Unreleased]: https://github.com/arryboom/rlnc-simdx/compare/v1.3.1...HEAD
+[1.3.1]: https://github.com/arryboom/rlnc-simdx/compare/v1.2.0...v1.3.1
 [1.2.0]: https://github.com/arryboom/rlnc-simdx/compare/v1.1.0...v1.2.0
 [1.1.0]: https://github.com/arryboom/rlnc-simdx/compare/v0.1.0...v1.1.0
 [0.1.0]: https://github.com/arryboom/rlnc-simdx/releases/tag/v0.1.0
